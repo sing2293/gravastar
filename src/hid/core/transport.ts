@@ -19,6 +19,8 @@ export interface Transport {
   send(bytes: Uint8Array): Promise<void>
   /** Subscribes to input reports; returns an unsubscribe function. */
   onInputReport(listener: InputReportListener): () => void
+  /** Optional: sends an output report on a different report ID (some vendor paths use a second report). */
+  sendWithReportId?(reportId: number, bytes: Uint8Array): Promise<void>
   close(): Promise<void>
 }
 
@@ -98,6 +100,11 @@ export class WebHidTransport implements Transport {
   onInputReport(listener: InputReportListener): () => void {
     this.listeners.add(listener)
     return () => this.listeners.delete(listener)
+  }
+
+  async sendWithReportId(reportId: number, bytes: Uint8Array): Promise<void> {
+    if (!this.device.opened) throw new Error(`${this.device.productName}: device is not open`)
+    await this.device.sendReport(reportId, Uint8Array.from(bytes))
   }
 
   async close(): Promise<void> {
