@@ -246,7 +246,8 @@ export function catalog(): KeyCatalogEntry[] {
     if (code) entry.browserCode = code
     out.push(entry)
   }
-  for (const [label, code] of Object.entries(DATA.legacy16ByCategory['basic'] ?? {})) add('basic', code, label)
+  // Vendor legends for the basic table are inconsistent ("PEnter", "Nubs"…); label from the HID usage instead.
+  for (const code of Object.values(DATA.legacy16ByCategory['basic'] ?? {})) add('basic', code, code <= HID_USAGE_MAX ? usageLabel(code) : undefined)
   for (const code of Object.values(DATA.modifierBits32)) add('modifiers', code)
   for (const [category, list] of PICKER_CATEGORIES) for (const code of DATA.uiPickerCategoryLists[list] ?? []) add(category, code)
   catalogCache = out
