@@ -5,7 +5,7 @@ import { FakeHidDevice } from '@/hid/core/testing/fakeHidDevice'
 import { K98ProFirmware } from '@/sim/k98pro/firmware'
 import { installLightingSim } from '@/sim/k98pro/lightingSim'
 import { K98Config } from './config'
-import { K98Lighting, buildWirelessLightReports, encodeGroupedRgb, groupColors, rgb565 } from './lighting'
+import { K98Lighting, beadId, buildWirelessLightReports, decodeLedBeads, encodeGroupedBeads, encodeGroupedRgb, groupColors, rgb565 } from './lighting'
 import { K98Macros, decodeMacroImage, encodeAction, encodeMacroImage, macroStorageSize } from './macros'
 import { K98Link } from './transport'
 
@@ -26,9 +26,32 @@ describe('K98Lighting', () => {
     expect(caps.zones).toEqual(['main', 'side', 'logo'])
     expect(caps.effects.main).toHaveLength(20)
     expect(caps.customEffectId).toBe(19)
-    expect(caps.streaming).toEqual({ perKey: true, fullKeys: true, experimental: true })
+    expect(caps.streaming).toEqual({ perKey: true, fullKeys: true, beads: true, experimental: true })
     expect(caps.sideLightCount).toBe(2)
     expect(await lighting.support()).toMatchObject({ musicMain: true, musicSpectrum: true, musicSide: false })
+  })
+
+  it('reads the LED-bead table and streams per-LED colours', async () => {
+    const { lighting, state, fake } = await setup()
+    const ids = Array.from({ length: 98 }, (_, i) => i + 1)
+    const table = await lighting.getLedBeads(ids)
+    expect(fake.sent.filter((s) => s.data[0] === 0xa1)).toHaveLength(10) // 10 ids per request packet
+    expect(table).toHaveLength(98)
+    expect(table.find((k) => k.id === 70)!.beads).toHaveLength(3) // Space
+    expect(table.find((k) => k.id === 1)!.beads).toHaveLength(1)
+    expect(table.reduce((n, k) => n + k.beads.length, 0)).toBe(98 + 2 + 4) // Space owns 3, four wide keys own 2
+    // vendor bead id packing round-trips
+    expect(beadId({ row: 5, col: 17 })).toBe(5 | (17 << 3))
+    expect(decodeLedBeads(Uint8Array.from([0, 70, 2, 5 | (17 << 3), 5 | (18 << 3)]))).toEqual([{ id: 70, beads: [{ row: 5, col: 17 }, { row: 5, col: 18 }] }])
+    const space = table.find((k) => k.id === 70)!
+    await lighting.streamBeads(space.beads.map((b) => ({ ...b, color: { r: 255, g: 0, b: 0 } })))
+    const sent = state.streamed.at(-1)!
+    expect(sent.sub).toBe(4)
+    expect(sent.data).toEqual([0xf8, 0x00, 3, ...space.beads.map(beadId)])
+    expect(encodeGroupedBeads([{ row: 0, col: 1, color: { r: 0, g: 255, b: 0 } }])).toEqual([0x07, 0xe0, 1, 8])
+    // firmware without a table: the reply echoes the request → empty
+    state.beadsSupported = false
+    expect(await lighting.getLedBeads([1, 2, 3])).toEqual([])
   })
 
   it('reads and writes zone records and effect ids', async () => {

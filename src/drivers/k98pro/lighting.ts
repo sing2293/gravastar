@@ -5,7 +5,7 @@
  */
 import { clamp, readU16be, u16be } from '@/hid/core/bytes'
 import type { LinkType, NumericRange, RGB } from '@/model/device'
-import type { KeyId, LightZone, LightingCapabilities, LightingEffectInfo, LightingService, PerKeyColor, ZoneLighting } from '@/model/keyboard'
+import type { BeadColor, KeyId, KeyLedBeads, LightZone, LightingCapabilities, LightingEffectInfo, LightingService, PerKeyColor, ZoneLighting } from '@/model/keyboard'
 import { alignedChunk, buildPackets, decodePayload } from './codec'
 import type { K98Config } from './config'
 import { Cmd, Info, Setting } from './enums'
@@ -121,6 +121,36 @@ export function rgb565(c: RGB): number {
   return (((c.r >> 3) & 31) << 11) | (((c.g >> 2) & 63) << 5) | ((c.b >> 3) & 31)
 }
 
+/** Vendor bead id: `row & 7 | (col & 31) << 3`. */
+export const beadId = (b: { row: number; col: number }): number => (b.row & 7) | ((b.col & 31) << 3)
+export const beadFromId = (id: number): { row: number; col: number } => ({ row: id & 7, col: (id >> 3) & 31 })
+
+/** Grouped payload for `0x08/0x04`: `[rgb565_hi, rgb565_lo, n, beadId0…]` per colour group. */
+export function encodeGroupedBeads(frame: BeadColor[]): number[] {
+  const groups = groupColors(frame.map((b) => ({ id: beadId(b), color: b.color })))
+  return groups.flatMap((g) => [...u16be(rgb565(g.color)), g.ids.length & 0xff, ...g.ids.map((id) => id & 0xff)])
+}
+
+/** Full-table payload for `0x08/0x03`: RGB565 per bead, sorted by row then column. */
+export function encodeBeadTable(frame: BeadColor[]): number[] {
+  return [...frame].sort((a, b) => a.row - b.row || a.col - b.col).flatMap((b) => u16be(rgb565(b.color)))
+}
+
+/** Reply of `0xA1`: `[id_hi, id_lo, count, count × beadByte]*`. */
+export function decodeLedBeads(data: Uint8Array): KeyLedBeads[] {
+  const out: KeyLedBeads[] = []
+  let i = 0
+  while (i + 3 <= data.length) {
+    const id = readU16be(data, i)
+    const count = data[i + 2]!
+    i += 3
+    const beads = []
+    for (let k = 0; k < count && i < data.length; k++) beads.push(beadFromId(data[i++]!))
+    out.push({ id, beads })
+  }
+  return out
+}
+
 /** Grouped payload for `0x08/0x01`: `[r, g, b, n, id0…]` per group (ids are single bytes here). */
 export function encodeGroupedRgb(groups: ColorGroup[]): number[] {
   return groups.flatMap((g) => [g.color.r & 0xff, g.color.g & 0xff, g.color.b & 0xff, g.ids.length & 0xff, ...g.ids.map((id) => id & 0xff)])
@@ -186,7 +216,7 @@ export class K98Lighting implements LightingService {
       speed: SPEED,
       customEffectId: CUSTOM_EFFECT_ID,
       randomColorIndex: RANDOM_COLOR_INDEX,
-      streaming: { perKey: features.keyIdRGB, fullKeys: features.fullKeysRGB, experimental: true },
+      streaming: { perKey: features.keyIdRGB, fullKeys: features.fullKeysRGB, beads: features.ledBeadTable565 || features.ledBeadRGB565, experimental: true },
       sideLightCount: support.sideLightCount,
     }
   }
@@ -236,6 +266,31 @@ export class K98Lighting implements LightingService {
     const payload = [color.r & 0xff, color.g & 0xff, color.b & 0xff]
     if (this.linkType === 'dongle') return this.sendWireless(2, payload)
     for (const p of buildPackets(Cmd.StreamRGB, 0x02, payload, this.reportId)) await this.link.sendCommand(p)
+  }
+
+  /**
+   * `0xA1`: 10 key ids per request packet, each sent on its own. The vendor treats a reply whose length byte equals
+   * the request's as an echo from firmware without a bead table and returns nothing.
+   */
+  async getLedBeads(ids: KeyId[]): Promise<KeyLedBeads[]> {
+    if (!ids.length) return []
+    const packets: Uint8Array[] = []
+    for (let i = 0; i < ids.length; i += 10) packets.push(buildPackets(Cmd.GetLedBeads, 0, ids.slice(i, i + 10).flatMap((id) => u16be(id)), this.reportId)[0]!)
+    const replies = await this.link.request(packets)
+    if (replies[0] && replies[0][5] === packets[0]![5]) return []
+    return decodeLedBeads(decodePayload(replies))
+  }
+
+  /**
+   * Per-LED frame. Wired: grouped bead ids (`0x08/0x04`) when the firmware reports RGB565 bead addressing, else the
+   * sorted full table (`0x08/0x03`). Dongle: only the full-table form exists (`updateRGBWithLedBeadsByWireless`).
+   */
+  async streamBeads(frame: BeadColor[]): Promise<void> {
+    if (!frame.length) return
+    if (this.linkType === 'dongle') return this.sendWireless(3, encodeBeadTable(frame))
+    const features = await this.config.features()
+    const [sub, payload] = features.ledBeadRGB565 || !features.ledBeadTable565 ? [0x04, encodeGroupedBeads(frame)] : [0x03, encodeBeadTable(frame)]
+    for (const p of buildPackets(Cmd.StreamRGB, sub, payload, this.reportId)) await this.link.sendCommand(p)
   }
 
   private async sendWireless(kind: 1 | 2 | 3, payload: number[]): Promise<void> {

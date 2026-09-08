@@ -6,11 +6,12 @@ import { navigate } from '@/ui/router'
 import { DpiPanel } from './panels/DpiPanel'
 import { MouseKeysPanel } from './panels/MouseKeysPanel'
 import { MouseLightingPanel } from './panels/MouseLightingPanel'
+import { MouseMusicPanel } from './panels/MouseMusicPanel'
 import { MouseOverviewPanel } from './panels/MouseOverviewPanel'
 import { MouseSettingsPanel } from './panels/MouseSettingsPanel'
 import { SensorPanel } from './panels/SensorPanel'
 
-export type MouseTab = 'overview' | 'dpi' | 'keys' | 'sensor' | 'lighting' | 'settings'
+export type MouseTab = 'overview' | 'dpi' | 'keys' | 'sensor' | 'lighting' | 'music' | 'settings'
 
 const TABS: { id: MouseTab; label: string }[] = [
   { id: 'overview', label: 'Overview' },
@@ -18,6 +19,7 @@ const TABS: { id: MouseTab; label: string }[] = [
   { id: 'keys', label: 'Buttons' },
   { id: 'sensor', label: 'Sensor' },
   { id: 'lighting', label: 'Lighting' },
+  { id: 'music', label: 'Music' },
   { id: 'settings', label: 'Settings' },
 ]
 
@@ -54,6 +56,7 @@ export function MousePage({ id, driver, summary, tab }: { id: string; driver: Mo
       {active === 'keys' && <MouseKeysPanel {...props} />}
       {active === 'sensor' && <SensorPanel {...props} />}
       {active === 'lighting' && <MouseLightingPanel {...props} />}
+      {active === 'music' && <MouseMusicPanel {...props} />}
       {active === 'settings' && <MouseSettingsPanel {...props} />}
     </div>
   )

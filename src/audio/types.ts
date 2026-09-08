@@ -1,4 +1,4 @@
-import type { RGB } from '@/model/device'
+import type { DeviceKind, RGB } from '@/model/device'
 import type { PerKeyColor } from '@/model/keyboard'
 
 export type AudioSourceKind = 'system' | 'tab' | 'microphone'
@@ -28,14 +28,64 @@ export interface AudioFrame {
   beatStrength: number
 }
 
-/** What a preset asks the device to show for one frame. Either per-key colours or one colour for everything. */
+/** What a preset asks a keyboard to show for one frame. Either per-key colours or one colour for everything. */
 export type LightingFrame = { keys: PerKeyColor[] } | { all: RGB }
+
+/** What every sink receives per tick; keyboard sinks render the preset themselves (they own a layout). */
+export interface MusicFrame {
+  audio: AudioFrame
+  /** Seconds since the session started. */
+  t: number
+  /** Preset id and user options, so sinks can render or derive colours consistently. */
+  preset: string
+  color: RGB
+  sensitivity: number
+  /** Single accent colour + intensity for devices with one light (mouse bar, receiver). */
+  accent: RGB
+  intensity: number
+}
+
+export interface SinkStatus {
+  id: string
+  label: string
+  kind: DeviceKind
+  enabled: boolean
+  /** Prepared and receiving frames. */
+  active: boolean
+  /** Device writes per second actually achieved. */
+  fps: number
+  /** Total writes this session (matters for memory-backed devices). */
+  writes: number
+  /** How the sink drives the device, e.g. "per-key streaming", "receiver bar", "gentle (memory-safe)". */
+  mode?: string
+  note?: string
+  error?: string
+}
+
+/**
+ * A device the engine can light up. Sinks own their pacing: `push` must return immediately and drop frames when
+ * the device is busy or when the sink's rate limit / write budget says so.
+ */
+export interface LightingSink {
+  readonly id: string
+  readonly label: string
+  readonly kind: DeviceKind
+  /** Snapshot the current lighting and put the device in a mode where pushed frames are visible. */
+  prepare(): Promise<void>
+  push(frame: MusicFrame): void
+  /** Restore the snapshot taken by `prepare`. */
+  release(): Promise<void>
+  status(): Omit<SinkStatus, 'enabled'>
+}
 
 export interface MusicSyncStatus {
   running: boolean
   source?: AudioSourceKind
   preset: string
-  /** Device writes per second actually achieved. */
+  /** Analysis frames per second. */
   fps: number
+  sinks: SinkStatus[]
+  /** `audio`: ticks come from the audio thread and survive the tab going to the background; `frame`: page-driven. */
+  clock?: 'audio' | 'frame'
   error?: string
 }

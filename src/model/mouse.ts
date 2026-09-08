@@ -194,6 +194,53 @@ export interface DongleService {
   pair(onStatus: (status: 'pairing' | 'success' | 'failed', secondsLeft: number) => void): Promise<'success' | 'failed'>
 }
 
+// Music sync --------------------------------------------------------------
+
+/**
+ * How a mouse can follow music, discovered at run time (docs/reverse-engineering/mouse/02-features.md §16 and
+ * 01-transport-commands.md §11: commands 0xB2/0xB6 exist for keyboards; the mouse light bar is memory-backed).
+ */
+export interface MouseMusicCapabilities {
+  /** Firmware acknowledged the amplitude command (0xB6): real-time, no memory wear. */
+  amplitudeStream: boolean
+  /** The receiver's RGB bar answers 0x19: command-driven, safe to update a few times per second. */
+  dongleBar: boolean
+  /** The light bar itself: settings-memory writes — usable only with a strict write budget. */
+  flashLight: boolean
+}
+
+export interface MusicAmplitudeParams {
+  mode: number
+  speed: number
+  brightness: number
+  colorMode: number
+  forward: RGB
+  backward: RGB
+}
+
+export interface DongleBar {
+  mode: number
+  color: RGB
+  speed: number
+  brightness: number
+  time: number
+}
+
+export interface MouseMusicService {
+  probe(): Promise<MouseMusicCapabilities>
+  /** Remember lighting / receiver state so `restore` can put it back. */
+  snapshot(): Promise<void>
+  restore(): Promise<void>
+  /** 0xB2: enter amplitude-driven mode with the given look. */
+  startAmplitude(params: MusicAmplitudeParams): Promise<void>
+  /** 0xB6: 20 levels 0..15, packed two per byte. Fire-and-forget; callers pace to ≤ ~10/s. */
+  sendAmplitudes(levels: ArrayLike<number>): Promise<void>
+  /** 0x18: receiver RGB bar. */
+  setDongleBar(bar: DongleBar): Promise<void>
+  /** Light-bar block write in settings memory. Callers MUST rate-limit and budget writes. */
+  setLightColor(color: RGB, brightness: number): Promise<void>
+}
+
 export interface MouseInfo {
   cid: number
   mid: number
@@ -227,6 +274,7 @@ export interface MouseDriver extends DriverBase<MouseEvents> {
   readonly power: MousePowerService
   readonly profiles: MouseProfileService
   readonly dongle?: DongleService
+  readonly music?: MouseMusicService
   factoryReset(): Promise<void>
   /** Raw 16 KiB settings image, for export/import (`.bin`, Compx-compatible). */
   exportSettings(): Promise<Uint8Array>

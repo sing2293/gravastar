@@ -13,12 +13,20 @@ export interface PresetContext {
   sensitivity: number
 }
 
+export interface Accent {
+  color: RGB
+  /** 0..1 */
+  intensity: number
+}
+
 export interface MusicPreset {
   id: string
   name: string
   description: string
   usesColor: boolean
   render(frame: AudioFrame, ctx: PresetContext): LightingFrame
+  /** One colour + intensity for single-light devices (mouse bar, receiver), consistent with `render`. */
+  accent(frame: AudioFrame, ctx: Omit<PresetContext, 'layout'>): Accent
 }
 
 export function hsv(h: number, s: number, v: number): RGB {
@@ -41,6 +49,20 @@ export function hsv(h: number, s: number, v: number): RGB {
 const scale = (c: RGB, k: number): RGB => ({ r: Math.round(c.r * k), g: Math.round(c.g * k), b: Math.round(c.b * k) })
 const clamp01 = (v: number) => Math.max(0, Math.min(1, v))
 
+/** Index of the loudest band, weighted toward the low end, as a hue source. */
+function dominantHue(frame: AudioFrame): number {
+  let best = 0
+  let bestV = -1
+  for (let i = 0; i < frame.bands.length; i++) {
+    const v = frame.bands[i]! * (1 - (i / frame.bands.length) * 0.4)
+    if (v > bestV) {
+      bestV = v
+      best = i
+    }
+  }
+  return frame.bands.length ? best / frame.bands.length : 0
+}
+
 function columnsOf(layout: KeyboardLayout): { key: LayoutKey; x: number; y: number }[] {
   const b = layoutBounds(layout)
   return layout.keys.map((key) => ({ key, x: (key.x + key.w / 2) / b.width, y: 1 - (key.y + key.h / 2) / b.height }))
@@ -55,9 +77,36 @@ const positions = (layout: KeyboardLayout) => {
 
 export const PRESETS: MusicPreset[] = [
   {
+    id: 'rise',
+    name: 'Rise (bottom → top)',
+    description: 'Light climbs from the bottom row to the top with loudness; bass warms the low rows, highs cool the top, beats pulse the bottom.',
+    usesColor: false,
+    render(frame, ctx) {
+      const level = clamp01(frame.level * ctx.sensitivity)
+      const n = frame.bands.length
+      const keys: PerKeyColor[] = []
+      for (const { key, y } of positions(ctx.layout)) {
+        // Low frequencies live at the bottom of the board, high ones at the top.
+        const band = Math.min(n - 1, Math.floor(y * n))
+        const energy = clamp01(frame.bands[band]! * ctx.sensitivity * 1.5)
+        const lit = y <= level
+        const edge = lit && level - y < 0.12 // the crest of the rising light
+        let glow = lit ? 0.35 + 0.65 * energy : 0
+        if (!lit && frame.beat && y < 0.18) glow = 0.6 * frame.beatStrength
+        const hue = 0.04 + 0.56 * y // orange at the bottom → blue at the top
+        keys.push({ id: key.id, color: scale(edge ? hsv(hue, 0.35, 1) : hsv(hue, 1, 1), glow) })
+      }
+      return { keys }
+    },
+    accent(frame, ctx) {
+      const level = clamp01(frame.level * ctx.sensitivity)
+      return { color: hsv(0.04 + 0.56 * level, 1, 1), intensity: level }
+    },
+  },
+  {
     id: 'spectrum',
-    name: 'Spectrum',
-    description: 'Frequency bands left → right, rising with loudness; rainbow across the board.',
+    name: 'Spectrum columns (side → side)',
+    description: 'One frequency band per column, left → right, each rising with its loudness; rainbow across the board.',
     usesColor: false,
     render(frame, ctx) {
       const keys: PerKeyColor[] = []
@@ -71,6 +120,9 @@ export const PRESETS: MusicPreset[] = [
       }
       return { keys }
     },
+    accent(frame, ctx) {
+      return { color: hsv((dominantHue(frame) + ctx.t * 0.05) % 1, 1, 1), intensity: clamp01(frame.level * ctx.sensitivity) }
+    },
   },
   {
     id: 'pulse',
@@ -81,20 +133,27 @@ export const PRESETS: MusicPreset[] = [
       const v = clamp01(frame.level * ctx.sensitivity * 0.9 + (frame.beat ? 0.5 * frame.beatStrength : 0))
       return { all: scale(ctx.color, 0.08 + 0.92 * v) }
     },
+    accent(frame, ctx) {
+      return { color: ctx.color, intensity: clamp01(frame.level * ctx.sensitivity * 0.9 + (frame.beat ? 0.5 * frame.beatStrength : 0)) }
+    },
   },
   {
     id: 'vu',
-    name: 'VU meter',
-    description: 'Fills from the left with loudness: green → yellow → red.',
+    name: 'VU meter (bottom → top)',
+    description: 'Fills the board from the bottom row upward with loudness: green → yellow → red.',
     usesColor: false,
     render(frame, ctx) {
       const level = clamp01(frame.level * ctx.sensitivity)
       const keys: PerKeyColor[] = []
-      for (const { key, x } of positions(ctx.layout)) {
-        const lit = x <= level
-        keys.push({ id: key.id, color: lit ? hsv((1 - x) * 0.33, 1, 1) : { r: 0, g: 0, b: 0 } })
+      for (const { key, y } of positions(ctx.layout)) {
+        const lit = y <= level
+        keys.push({ id: key.id, color: lit ? hsv((1 - y) * 0.33, 1, 1) : { r: 0, g: 0, b: 0 } })
       }
       return { keys }
+    },
+    accent(frame, ctx) {
+      const level = clamp01(frame.level * ctx.sensitivity)
+      return { color: hsv((1 - level) * 0.33, 1, 1), intensity: level }
     },
   },
   {
@@ -112,6 +171,10 @@ export const PRESETS: MusicPreset[] = [
         keys.push({ id: key.id, color: scale(y > 0.85 && frame.beat ? { r: 255, g: 255, b: 255 } : hsv((hue + y * 0.2) % 1, 0.9, 1), v) })
       }
       return { keys }
+    },
+    accent(frame, ctx) {
+      const hue = (ctx.t * 0.03) % 1
+      return { color: frame.beat ? { r: 255, g: 255, b: 255 } : hsv(hue, 0.9, 1), intensity: clamp01(frame.bass * ctx.sensitivity * 1.8) }
     },
   },
 ]

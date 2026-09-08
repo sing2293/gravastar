@@ -6,7 +6,7 @@
 import { sleep } from '@/hid/core/request'
 import { u16be } from '@/hid/core/bytes'
 import type { DisplayCapabilities, DisplayImage, DisplayService } from '@/model/keyboard'
-import { buildPackets, decodePayload, withChecksum } from './codec'
+import { PAYLOAD_MAX, buildPackets, decodePayload, withChecksum } from './codec'
 import { Cmd, Info } from './enums'
 import { u32be } from './keymap'
 import type { K98Link } from './transport'
@@ -139,7 +139,7 @@ export class K98Display implements DisplayService {
     body.set(image.gif, header.length)
     await this.transferStatus(Cmd.LcdTransfer, ImageKind.Dynamic, TransferStatus.Start, [slot, 1, 0])
     try {
-      const packets = rewriteTransferPackets(buildPackets(Cmd.LcdPixelsWrite, 0, body, this.reportId), this.reportId)
+      const packets = rewriteTransferPackets(buildPackets(Cmd.LcdPixelsWrite, 0, body, this.reportId, PAYLOAD_MAX, true), this.reportId)
       for (let i = 0; i < packets.length; i++) {
         await this.link.sendCommand(packets[i]!)
         onProgress?.((i + 1) / packets.length)

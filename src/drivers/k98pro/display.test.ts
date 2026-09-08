@@ -50,6 +50,21 @@ describe('K98Display', () => {
     expect(progress.length).toBe(3)
   })
 
+  it('uploads a real-size GIF (thousands of packets) with 16-bit packet counters', async () => {
+    const { display, state, fake } = await setup()
+    const gif = Uint8Array.from({ length: 60_000 }, (_, i) => (i * 7) & 0xff)
+    let last = 0
+    await display.upload({ gif, width: 428, height: 142, fps: 1 }, (f) => (last = f))
+    const packets = Math.ceil((18 + gif.length) / 56)
+    expect(packets).toBeGreaterThan(255)
+    expect(last).toBe(1)
+    expect(state.received.length).toBe(18 + gif.length)
+    expect(Array.from(state.received.subarray(18))).toEqual(Array.from(gif))
+    // pixel packet 300: count and index are 16-bit big-endian in bytes 1–4
+    const p300 = fake.sent.find((s) => s.data[0] === 0x1f && ((s.data[3]! << 8) | s.data[4]!) === 300)!
+    expect(hex(p300.data.subarray(0, 6))).toBe(`1f ${(packets >> 8).toString(16).padStart(2, '0')} ${(packets & 0xff).toString(16).padStart(2, '0')} 01 2c 38`)
+  })
+
   it('sends the time payload', async () => {
     const { display, state } = await setup()
     await display.syncTime(new Date(2026, 8, 7, 16, 45, 30)) // Mon 7 Sep 2026

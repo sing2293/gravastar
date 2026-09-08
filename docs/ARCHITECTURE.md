@@ -64,10 +64,27 @@ is JSON of these types; vendor profile files are converted at the edge.
   3. **Microphone** — `getUserMedia({ audio })`, what the Compx tool's "recorder music" mode uses.
 - `analyzer.ts`: `AnalyserNode` FFT → normalized bands (bass/mid/treble + N columns), RMS energy, and a simple
   onset/beat detector with adaptive threshold. Runs on `requestAnimationFrame`.
-- `musicSync.ts`: maps analysis frames to `LightingFrame`s through presets (spectrum-across-columns, bass pulse,
-  VU meter, color cycle on beat) and **rate-limits device writes** (≤ 30 Hz keyboard per-key RGB; mouse color
-  updates ≤ 20 Hz), coalescing frames when the queue is busy. The device is put in its "custom/static" mode first
-  and restored afterwards.
+- `musicSync.ts`: **one engine, many sinks.** The engine owns the audio source and the analysis loop; every
+  connected device registers a `LightingSink` (`sinks/keyboardSink.ts`, `sinks/mouseSink.ts`) that receives a
+  `MusicFrame` per tick — the audio features plus the preset's per-keyboard rendering inputs and an `accent`
+  colour/intensity for single-light devices. Sinks pace themselves and drop frames when the device is busy; the
+  engine never awaits a sink. Presets live in `presets.ts` and provide both `render` (per-key) and `accent`.
+- Keyboard sink: ≤ 30 Hz streaming, custom effect entered on `prepare`, previous zone record restored on `release`.
+  On `prepare` it reads the firmware's **LED-bead table** (`0xA1`: which physical LEDs each key owns — Space has
+  three, Backspace/Enter/Shift two) and, when present, addresses LEDs (`0x08/0x04` grouped RGB565 bead ids; the
+  sorted full table `0x08/0x03` on the dongle). The per-key command (`0x08/0x01`) lights one LED per key and is the
+  fallback. Verified on hardware: with per-key streaming only one of the space bar's LEDs lit.
+- `clock.ts`: the analysis loop is ticked from the **audio thread** (a ScriptProcessorNode on the capture graph), not
+  `requestAnimationFrame`: rAF stops and timers drop to 1 Hz when the tab is hidden, and music sync must keep going
+  while the user is in another app. The tab still has to stay open — the keyboard has no microphone and none of its
+  stored effects react to sound (the firmware's `musicMain/musicSpectrum/musicSide` flags are unused by the vendor
+  tool and have no command behind them), so the PC must feed it colours.
+- Mouse sink — the mouse's light bar is **not** a real-time channel (it is a block in settings memory), so the sink
+  probes at `prepare` and picks the safest capable path: (1) `0xB6` amplitude streaming if the firmware
+  acknowledges it (≤ 10 Hz, no memory writes); (2) the receiver's RGB bar via `0x18` (command-driven, ≤ 4 Hz);
+  (3) **gentle mode** — a colour change only on strong beats, at most one settings write per 1.5 s and a hard
+  per-session write budget, after which the mouse pauses and the UI says so. Whether GravaStar mice accept
+  `0xB2/0xB6` is UNVERIFIED; the probe is harmless (a zero frame) and the UI reports which path is active.
 
 ### `sim/`
 `SimK98Pro` and `SimCompxMouse` implement the transport interface with in-memory state and reply like the real
@@ -79,6 +96,13 @@ Dark, instrument-like, matching the keyboard's look: background `#070a14` / surf
 100/60/30 %, accent lime `#9bff31`, secondary purple `#6a2eee`, danger `#ff2441`, keyboard key face `#2e2f32`
 with `#3b3939` border. Tokens live in `src/ui/theme.css`; light mode is not a goal. Layout: left device sidebar,
 top tab bar per device, keyboard/mouse stage on the left of each panel, controls on the right.
+
+### `display/` — LCD images
+`prepare.ts` decodes (WebCodecs `ImageDecoder` for animated GIFs), frames the picture (**fill/crop** with zoom and
+drag-to-pan, fit/letter-box, stretch — the preview *is* the upload), quantises to the fixed R3G3B2 palette with
+optional ordered dithering and encodes a GIF that the driver sends as one `CompressedGif` dynamic frame. Uploads run
+into thousands of 56-byte packets, so `buildPackets(…, wide = true)` lifts the 255-packet limit and the display
+service rewrites bytes 1–4 with 16-bit count/index as the vendor does (first hardware test failed on exactly this).
 
 ## Validation order (hardware we have: K98 Pro, wired)
 1. `hid/core` + keyboard `config` service: read firmware version, battery, polling rate — proves framing + CRC.

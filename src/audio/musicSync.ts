@@ -1,57 +1,122 @@
 /**
- * Music sync engine: captures audio, analyses it on every animation frame, renders a preset into a lighting frame
- * and streams it to the keyboard at a bounded rate (docs/ARCHITECTURE.md → audio).
+ * Music sync engine: one audio source, one analysis loop, any number of device sinks (keyboard per-key RGB, mouse
+ * light bar / receiver) that each pace their own writes. See docs/ARCHITECTURE.md → audio.
  */
 import type { RGB } from '@/model/device'
-import type { KeyboardDriver, KeyboardLayout, ZoneLighting } from '@/model/keyboard'
 import { AudioAnalyzer, DEFAULT_ANALYZER, type AnalyzerOptions } from './analyzer'
 import { captureAudio, type CapturedAudio } from './capture'
+import type { TickSource } from './clock'
 import { PRESETS, presetById, type MusicPreset } from './presets'
-import type { AudioFrame, AudioSourceKind, LightingFrame, MusicSyncStatus } from './types'
+import type { AudioFrame, AudioSourceKind, LightingSink, MusicFrame, MusicSyncStatus, SinkStatus } from './types'
 
 export interface MusicSyncOptions {
   preset: string
   color: RGB
   sensitivity: number
-  /** Device writes per second, upper bound. */
-  maxFps: number
   analyzer?: Partial<AnalyzerOptions>
 }
 
-export const DEFAULT_MUSIC_OPTIONS: MusicSyncOptions = { preset: 'spectrum', color: { r: 155, g: 255, b: 49 }, sensitivity: 1, maxFps: 30 }
+export const DEFAULT_MUSIC_OPTIONS: MusicSyncOptions = { preset: 'rise', color: { r: 155, g: 255, b: 49 }, sensitivity: 1 }
 
 export type StatusListener = (status: MusicSyncStatus) => void
 
+/** Frame source abstraction so the engine can be driven without Web Audio in tests. */
+export interface FrameSource {
+  frame(now: number): AudioFrame
+  close(): Promise<void>
+}
+
+export interface EngineHooks {
+  /** Replaces `captureAudio` + `AudioAnalyzer` (tests). */
+  openSource?: (kind: AudioSourceKind, deviceId?: string) => Promise<OpenedSource>
+  /** Replaces `requestAnimationFrame` when the source provides no clock (tests). */
+  schedule?: (cb: () => void) => number
+  cancel?: (handle: number) => void
+  now?: () => number
+}
+
+export interface OpenedSource {
+  source: FrameSource
+  stop(): void
+  onEnded?: (cb: () => void) => void
+  /** Drives `step`; without one the engine falls back to animation frames (which pause in background tabs). */
+  clock?: TickSource
+}
+
 export class MusicSyncEngine {
-  private capture: CapturedAudio | undefined
-  private analyzer: AudioAnalyzer | undefined
-  private raf = 0
+  private readonly sinks = new Map<string, { sink: LightingSink; enabled: boolean }>()
+  private source: FrameSource | undefined
+  private stopSource: (() => void) | undefined
+  private clock: TickSource | undefined
+  private handle = 0
   private startedAt = 0
-  private lastSend = 0
-  private sending = false
-  private sentCount = 0
-  private fpsWindowStart = 0
-  private previousLighting: ZoneLighting | undefined
+  private frames = 0
+  private fpsWindow = 0
   private preset: MusicPreset
   private status: MusicSyncStatus
   private readonly listeners = new Set<StatusListener>()
   lastFrame: AudioFrame | undefined
-  lastLighting: LightingFrame | undefined
   options: MusicSyncOptions
 
   constructor(
-    private readonly driver: KeyboardDriver,
-    private readonly layout: KeyboardLayout,
     options: Partial<MusicSyncOptions> = {},
+    private readonly hooks: EngineHooks = {},
   ) {
     this.options = { ...DEFAULT_MUSIC_OPTIONS, ...options }
     this.preset = presetById(this.options.preset)
-    this.status = { running: false, preset: this.preset.id, fps: 0 }
+    this.status = { running: false, preset: this.preset.id, fps: 0, sinks: [] }
   }
 
   static presets(): MusicPreset[] {
     return PRESETS
   }
+
+  // -- sinks -------------------------------------------------------------------
+
+  /** Registers a device; new sinks start enabled and are prepared immediately if a session is running. */
+  addSink(sink: LightingSink, enabled = true): void {
+    const existing = this.sinks.get(sink.id)
+    if (existing) {
+      if (existing.sink !== sink) void existing.sink.release().catch(() => undefined)
+      this.sinks.set(sink.id, { sink, enabled })
+    } else this.sinks.set(sink.id, { sink, enabled })
+    if (this.status.running && enabled) void this.prepareSink(sink)
+    this.refresh()
+  }
+
+  removeSink(id: string): void {
+    const entry = this.sinks.get(id)
+    if (!entry) return
+    this.sinks.delete(id)
+    if (this.status.running) void entry.sink.release().catch(() => undefined)
+    this.refresh()
+  }
+
+  setEnabled(id: string, enabled: boolean): void {
+    const entry = this.sinks.get(id)
+    if (!entry || entry.enabled === enabled) return
+    entry.enabled = enabled
+    if (this.status.running) {
+      if (enabled) void this.prepareSink(entry.sink)
+      else void entry.sink.release().catch(() => undefined)
+    }
+    this.refresh()
+  }
+
+  getSink(id: string): LightingSink | undefined {
+    return this.sinks.get(id)?.sink
+  }
+
+  private async prepareSink(sink: LightingSink): Promise<void> {
+    try {
+      await sink.prepare()
+    } catch (error) {
+      this.setStatus({ error: `${sink.label}: ${(error as Error).message}` })
+    }
+    this.refresh()
+  }
+
+  // -- lifecycle --------------------------------------------------------------
 
   onStatus(listener: StatusListener): () => void {
     this.listeners.add(listener)
@@ -65,86 +130,87 @@ export class MusicSyncEngine {
 
   update(patch: Partial<MusicSyncOptions>): void {
     this.options = { ...this.options, ...patch }
-    if (patch.preset) {
-      this.preset = presetById(patch.preset)
-      this.setStatus({ preset: this.preset.id })
-    }
+    if (patch.preset) this.preset = presetById(patch.preset)
+    this.setStatus({ preset: this.preset.id })
   }
 
-  async start(source: AudioSourceKind): Promise<void> {
+  /** `deviceId`: a specific input device for `kind === 'microphone'` (see `audioInputDevices`). */
+  async start(kind: AudioSourceKind, deviceId?: string): Promise<void> {
     await this.stop()
     this.setStatus({ error: undefined })
-    const capture = await captureAudio(source)
-    try {
-      this.analyzer = new AudioAnalyzer(capture.stream, { ...DEFAULT_ANALYZER, ...this.options.analyzer })
-      await this.analyzer.resume()
-      // Put the keyboard in per-key ("custom") mode so streamed colours are visible; remember what to restore.
-      const caps = await this.driver.lighting.capabilities()
-      this.previousLighting = await this.driver.lighting.get('main')
-      if (caps.customEffectId !== undefined && this.previousLighting.effectId !== caps.customEffectId) await this.driver.lighting.setEffect('main', caps.customEffectId)
-    } catch (error) {
-      capture.stop()
-      await this.analyzer?.close().catch(() => undefined)
-      this.analyzer = undefined
-      this.setStatus({ running: false, error: (error as Error).message })
-      throw error
-    }
-    this.capture = capture
-    capture.stream.getAudioTracks()[0]?.addEventListener('ended', () => void this.stop('Audio sharing ended'))
-    this.startedAt = performance.now()
-    this.fpsWindowStart = this.startedAt
-    this.sentCount = 0
-    this.setStatus({ running: true, source, fps: 0 })
-    this.loop()
+    const opened = await (this.hooks.openSource ?? ((k, d) => defaultOpenSource(k, d, this.options.analyzer)))(kind, deviceId)
+    this.source = opened.source
+    this.stopSource = opened.stop
+    opened.onEnded?.(() => void this.stop('Audio sharing ended'))
+    const now = this.now()
+    this.startedAt = now
+    this.fpsWindow = now
+    this.frames = 0
+    this.setStatus({ running: true, source: kind, fps: 0, clock: opened.clock?.kind ?? 'frame' })
+    await Promise.all([...this.sinks.values()].filter((e) => e.enabled).map((e) => this.prepareSink(e.sink)))
+    if (!this.source) return // stopped while the sinks were being prepared
+    if (opened.clock) {
+      this.clock = opened.clock
+      this.clock.start(() => this.step())
+    } else this.tick()
   }
 
   async stop(reason?: string): Promise<void> {
-    cancelAnimationFrame(this.raf)
-    this.raf = 0
+    if (this.handle) (this.hooks.cancel ?? cancelAnimationFrame)(this.handle)
+    this.handle = 0
+    this.clock?.stop()
+    this.clock = undefined
     const wasRunning = this.status.running
-    this.capture?.stop()
-    this.capture = undefined
-    await this.analyzer?.close().catch(() => undefined)
-    this.analyzer = undefined
-    if (wasRunning && this.previousLighting) {
-      try {
-        await this.driver.lighting.set('main', this.previousLighting)
-      } catch {
-        /* keyboard may be gone */
-      }
-    }
-    this.previousLighting = undefined
+    this.stopSource?.()
+    this.stopSource = undefined
+    await this.source?.close().catch(() => undefined)
+    this.source = undefined
+    if (wasRunning) await Promise.all([...this.sinks.values()].map((e) => e.sink.release().catch(() => undefined)))
     this.lastFrame = undefined
-    this.setStatus({ running: false, source: undefined, fps: 0, ...(reason ? { error: reason } : {}) })
+    this.setStatus({ running: false, source: undefined, fps: 0, clock: undefined, ...(reason ? { error: reason } : {}) })
   }
 
-  private loop = (): void => {
-    if (!this.analyzer) return
-    const now = performance.now()
-    const frame = this.analyzer.frame(now)
-    this.lastFrame = frame
-    const interval = 1000 / this.options.maxFps
-    if (!this.sending && now - this.lastSend >= interval) {
-      const lighting = this.preset.render(frame, { layout: this.layout, t: (now - this.startedAt) / 1000, color: this.options.color, sensitivity: this.options.sensitivity })
-      this.lastLighting = lighting
-      this.lastSend = now
-      this.sending = true
-      const send = 'all' in lighting ? this.driver.lighting.streamAll(lighting.all) : this.driver.lighting.stream(lighting.keys)
-      send
-        .then(() => {
-          this.sentCount++
-          if (now - this.fpsWindowStart >= 1000) {
-            this.setStatus({ fps: Math.round((this.sentCount * 1000) / (now - this.fpsWindowStart)) })
-            this.fpsWindowStart = now
-            this.sentCount = 0
-          }
-        })
-        .catch((error: Error) => this.setStatus({ error: error.message }))
-        .finally(() => {
-          this.sending = false
-        })
+  /** Runs one analysis step and pushes to every enabled sink (public for tests). */
+  step(now = this.now()): void {
+    if (!this.source) return
+    const audio = this.source.frame(now)
+    this.lastFrame = audio
+    const t = (now - this.startedAt) / 1000
+    const ctx = { t, color: this.options.color, sensitivity: this.options.sensitivity }
+    const accent = this.preset.accent(audio, ctx)
+    const frame: MusicFrame = { audio, t, preset: this.preset.id, color: this.options.color, sensitivity: this.options.sensitivity, accent: accent.color, intensity: accent.intensity }
+    for (const { sink, enabled } of this.sinks.values()) {
+      if (!enabled) continue
+      try {
+        sink.push(frame)
+      } catch (error) {
+        this.setStatus({ error: `${sink.label}: ${(error as Error).message}` })
+      }
     }
-    this.raf = requestAnimationFrame(this.loop)
+    this.frames++
+    if (now - this.fpsWindow >= 1000) {
+      this.setStatus({ fps: Math.round((this.frames * 1000) / (now - this.fpsWindow)), sinks: this.sinkStatuses() })
+      this.fpsWindow = now
+      this.frames = 0
+    }
+  }
+
+  private tick = (): void => {
+    if (!this.source) return
+    this.step()
+    this.handle = (this.hooks.schedule ?? requestAnimationFrame)(this.tick)
+  }
+
+  private now(): number {
+    return (this.hooks.now ?? (() => performance.now()))()
+  }
+
+  private sinkStatuses(): SinkStatus[] {
+    return [...this.sinks.values()].map(({ sink, enabled }) => ({ ...sink.status(), enabled }))
+  }
+
+  private refresh(): void {
+    this.setStatus({ sinks: this.sinkStatuses() })
   }
 
   private setStatus(patch: Partial<MusicSyncStatus>): void {
@@ -153,11 +219,23 @@ export class MusicSyncEngine {
   }
 }
 
-const engines = new Map<string, MusicSyncEngine>()
-
-/** One engine per device so the panel can be closed and reopened without stopping the music. */
-export function musicEngineFor(id: string, driver: KeyboardDriver, layout: KeyboardLayout): MusicSyncEngine {
-  let e = engines.get(id)
-  if (!e) engines.set(id, (e = new MusicSyncEngine(driver, layout)))
-  return e
+async function defaultOpenSource(kind: AudioSourceKind, deviceId?: string, analyzerOptions?: Partial<AnalyzerOptions>): Promise<OpenedSource> {
+  const capture: CapturedAudio = await captureAudio(kind, deviceId)
+  let analyzer: AudioAnalyzer
+  try {
+    analyzer = new AudioAnalyzer(capture.stream, { ...DEFAULT_ANALYZER, ...analyzerOptions })
+    await analyzer.resume()
+  } catch (error) {
+    capture.stop()
+    throw error
+  }
+  return {
+    source: { frame: (now: number) => analyzer.frame(now), close: () => analyzer.close() },
+    clock: analyzer.clock(),
+    stop: () => capture.stop(),
+    onEnded: (cb: () => void) => capture.stream.getAudioTracks()[0]?.addEventListener('ended', cb),
+  }
 }
+
+/** The app has one engine; devices register sinks with it. */
+export const musicEngine = new MusicSyncEngine()

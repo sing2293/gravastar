@@ -7,12 +7,17 @@ import type { FakeHidDevice } from '@/hid/core/testing/fakeHidDevice'
 import { Addr, FLASH_SIZE, encodeDpiColor, encodeDpiStage, encodeKeySlot, encodeLightBlock, reportRateToByte, writeValue } from '@/drivers/compx/eeprom'
 import { Command, FRAME_SIZE, REPORT_ID, frameChecksum, parseFrame } from '@/drivers/compx/frame'
 import { MODELS, type MouseModel } from '@/drivers/compx/models'
+import { MusicCommand, unpackAmplitudes } from '@/drivers/compx/music'
 
 export interface CompxSimOptions {
   model?: MouseModel
   /** `EncryptionData` type byte: 0 dongle 1K, 1 dongle 4K, 2 wired 1K, 3 wired 8K, 4 dongle 2K, 5 dongle 8K. */
   typeByte?: number
   online?: boolean
+  /** Accept the office-keyboard music commands 0xB2/0xB6/0xB7 (UNVERIFIED on mouse firmware; default false). */
+  supportsMusicAmplitude?: boolean
+  /** Answer 0x18/0x19 for the receiver RGB bar (default: true for dongle type bytes, false for wired). */
+  supportsDongleBar?: boolean
 }
 
 export class CompxMouseFirmware {
@@ -28,12 +33,28 @@ export class CompxMouseFirmware {
   supportsLongRange: boolean
   pairState: 1 | 2 | 3 = 3
   readonly log: string[] = []
+  // Music sync (docs/reverse-engineering/mouse/01-transport-commands.md §11): unsupported commands echo with status 1.
+  supportsMusicAmplitude: boolean
+  supportsDongleBar: boolean
+  /** Every accepted 0xB6 frame, unpacked to its 20 levels. */
+  readonly amplitudes: number[][] = []
+  /** Last accepted 0xB2 payload `[mode, speed, brightness, colourMode, fwd RGB, back RGB]`. */
+  musicParams: number[] | undefined
+  /** Last accepted 0xB7 `[lightState, macroState]`. */
+  customLightState: number[] | undefined
+  /** Receiver bar `[mode, r, g, b, speed, brightness, time]`: 0x18 replaces it, 0x19 reports it at reply `[5..11]`. */
+  dongleBar: number[] = [1, 0, 0, 255, 5, 9, 0]
+  /** `WriteFlashData` frames accepted (settings-memory wear). */
+  flashWrites = 0
 
   constructor(options: CompxSimOptions = {}) {
     this.model = options.model ?? MODELS[2]!
     this.typeByte = options.typeByte ?? 2
     this.online = options.online ?? true
-    this.supportsLongRange = this.typeByte !== 2 && this.typeByte !== 3
+    const wired = this.typeByte === 2 || this.typeByte === 3
+    this.supportsLongRange = !wired
+    this.supportsMusicAmplitude = options.supportsMusicAmplitude ?? false
+    this.supportsDongleBar = options.supportsDongleBar ?? !wired
     this.loadDefaults()
   }
 
@@ -106,6 +127,7 @@ export class CompxMouseFirmware {
         return [this.echo(data, { 5: this.pairState, 6: 12 })]
       case Command.WriteFlashData: {
         this.flash.set(f.payload, f.address)
+        this.flashWrites++
         return [this.echo(data)]
       }
       case Command.ReadFlashData: {
@@ -132,6 +154,24 @@ export class CompxMouseFirmware {
         return [this.echo(data, { 5: this.longRange ? 1 : 0 }, this.supportsLongRange ? 0 : 1)]
       case Command.GetMotorParam:
         return [this.echo(data, { 5: 0 })]
+      case Command.SetDongleRGBBarMode:
+        if (this.supportsDongleBar) this.dongleBar = Array.from(f.payload.subarray(0, 7))
+        return [this.echo(data, {}, this.supportsDongleBar ? 0 : 1)]
+      case Command.GetDongleRGBBarMode: {
+        if (!this.supportsDongleBar) return [this.echo(data, {}, 1)]
+        const set: Record<number, number> = {}
+        this.dongleBar.forEach((v, i) => (set[5 + i] = v))
+        return [this.echo(data, set)]
+      }
+      case MusicCommand.OfficeMusicParameter:
+        if (this.supportsMusicAmplitude) this.musicParams = Array.from(f.payload)
+        return [this.echo(data, {}, this.supportsMusicAmplitude ? 0 : 1)]
+      case MusicCommand.OfficeMusicAmplitude:
+        if (this.supportsMusicAmplitude) this.amplitudes.push(unpackAmplitudes(f.payload))
+        return [this.echo(data, {}, this.supportsMusicAmplitude ? 0 : 1)]
+      case MusicCommand.OfficeCustomLightState:
+        if (this.supportsMusicAmplitude) this.customLightState = [f.payload[0] ?? 0, f.payload[1] ?? 0]
+        return [this.echo(data, {}, this.supportsMusicAmplitude ? 0 : 1)]
       default:
         return [this.echo(data)]
     }

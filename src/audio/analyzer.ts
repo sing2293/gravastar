@@ -1,3 +1,4 @@
+import { audioClock, frameClock, supportsAudioClock, type TickSource } from './clock'
 import type { AudioFrame } from './types'
 
 export interface AnalyzerOptions {
@@ -98,6 +99,11 @@ export class AudioAnalyzer {
 
   async resume(): Promise<void> {
     if (this.ctx.state !== 'running') await this.ctx.resume()
+  }
+
+  /** A tick source that keeps its cadence while the tab is in the background (see clock.ts). */
+  clock(targetMs = 20): TickSource {
+    return supportsAudioClock(this.ctx) ? audioClock(this.ctx, this.source, targetMs) : frameClock(targetMs)
   }
 
   frame(now = performance.now()): AudioFrame {

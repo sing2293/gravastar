@@ -52,6 +52,28 @@ describe('presets', () => {
       expect(right.color.r + right.color.g + right.color.b).toBe(0)
     }
   })
+  it('Rise lights the board from the bottom row upward', () => {
+    const ctx = { layout: LAYOUTS.us, t: 0, color: { r: 255, g: 0, b: 0 }, sensitivity: 1 }
+    const half = { ...frame, level: 0.5, beat: false, beatStrength: 0 }
+    const out = PRESETS.find((p) => p.id === 'rise')!.render(half, ctx)
+    if (!('keys' in out)) throw new Error('rise renders per key')
+    const sum = (id: number) => {
+      const c = out.keys.find((k) => k.id === id)!.color
+      return c.r + c.g + c.b
+    }
+    expect(sum(70)).toBeGreaterThan(0) // Space — bottom row
+    expect(sum(43)).toBeGreaterThan(0) // A — home row (≈ 40% up)
+    expect(sum(1)).toBe(0) // Esc — top row stays dark at half loudness
+    expect(sum(13)).toBe(0) // F12
+    const loud = PRESETS.find((p) => p.id === 'rise')!.render({ ...half, level: 1 }, ctx)
+    if ('keys' in loud) expect(loud.keys.every((k) => k.color.r + k.color.g + k.color.b > 0)).toBe(true)
+    const vu = PRESETS.find((p) => p.id === 'vu')!.render(half, ctx)
+    if ('keys' in vu) {
+      expect(vu.keys.find((k) => k.id === 70)!.color.g).toBe(255) // bottom = green
+      expect(vu.keys.find((k) => k.id === 1)!.color).toEqual({ r: 0, g: 0, b: 0 })
+    }
+  })
+
   it('hsv converts primaries', () => {
     expect(hsv(0, 1, 1)).toEqual({ r: 255, g: 0, b: 0 })
     expect(hsv(1 / 3, 1, 1)).toEqual({ r: 0, g: 255, b: 0 })

@@ -60,6 +60,7 @@ import {
 import { Command, REPORT_ID, buildFrame } from './frame'
 import { CompxLink } from './link'
 import { FALLBACK_MODEL, LIGHT_MODES, PERFORMANCE_OPTIONS_SECONDS, SLEEP_OPTIONS_SECONDS, findModel, type MouseModel } from './models'
+import { CompxMusic } from './music'
 
 /** `EncryptionData` reply byte 11 → link and ceiling report rate. */
 const DEVICE_TYPES: Record<number, { wired: boolean; maxReportRate: ReportRate }> = {
@@ -101,6 +102,8 @@ export class CompxMouseDriver implements MouseDriver {
   readonly lighting: MouseLightingService
   readonly power: MousePowerService
   readonly profiles: MouseProfileService
+  /** Music sync; what the firmware accepts is probed at run time (`music.probe()`), not assumed from the model. */
+  readonly music: CompxMusic
   dongle?: DongleService
   private readonly emitter = new Emitter<MouseEvents>()
   private session: CompxSession | undefined
@@ -119,6 +122,7 @@ export class CompxMouseDriver implements MouseDriver {
     this.lighting = new LightingSvc(this)
     this.power = new PowerSvc(this)
     this.profiles = new ProfileSvc(this)
+    this.music = new CompxMusic(this)
   }
 
   static async open(device: HidDeviceLike, link: LinkType): Promise<CompxMouseDriver> {

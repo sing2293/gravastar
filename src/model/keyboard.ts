@@ -204,8 +204,8 @@ export interface LightingCapabilities {
   /** Effect id that shows the per-key custom colours (K98 Pro: 19). */
   customEffectId?: number
   randomColorIndex: number
-  /** Real-time colour streaming for music sync — reported by the device feature bitmap. */
-  streaming: { perKey: boolean; fullKeys: boolean } & Experimental
+  /** Real-time colour streaming for music sync — reported by the device feature bitmap. `beads`: per-LED addressing. */
+  streaming: { perKey: boolean; fullKeys: boolean; beads: boolean } & Experimental
   sideLightCount?: number
 }
 
@@ -219,6 +219,28 @@ export interface LightingService {
   /** Fire-and-forget frame for music sync; no reply is awaited. */
   stream(frame: PerKeyColor[]): Promise<void>
   streamAll(color: RGB): Promise<void>
+  /**
+   * Which physical LEDs each key owns — wide keys (Space, Shift, Enter…) have several. Empty when the firmware has no
+   * bead table; then `stream` (one colour per key id) is all there is.
+   */
+  getLedBeads(ids: KeyId[]): Promise<KeyLedBeads[]>
+  /** Fire-and-forget frame addressed to individual LEDs. */
+  streamBeads(frame: BeadColor[]): Promise<void>
+}
+
+/** One LED in the firmware's bead matrix (3-bit row, 5-bit column). */
+export interface LedBead {
+  row: number
+  col: number
+}
+
+export interface KeyLedBeads {
+  id: KeyId
+  beads: LedBead[]
+}
+
+export interface BeadColor extends LedBead {
+  color: RGB
 }
 
 // Macros ---------------------------------------------------------------------

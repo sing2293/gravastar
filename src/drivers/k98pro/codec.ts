@@ -45,18 +45,23 @@ export function alignedChunk(requestRecord: number, responseRecord: number = req
  * Splits `payload` into `max(ceil(len / chunk), 1)` packets that all repeat `commandId`/`param`.
  * An empty payload still yields one packet.
  */
-export function buildPackets(commandId: number, param: number, payload: ArrayLike<number>, reportId: number, chunk = PAYLOAD_MAX): Uint8Array[] {
+/**
+ * `wide` lifts the 255-packet limit for transfers whose packets get a 16-bit count/index written over bytes 1–4
+ * afterwards (display images, see display.ts); bytes 3/4 then only carry the low bytes, as the vendor's do.
+ */
+export function buildPackets(commandId: number, param: number, payload: ArrayLike<number>, reportId: number, chunk = PAYLOAD_MAX, wide = false): Uint8Array[] {
   if (chunk <= 0 || chunk > PAYLOAD_MAX) throw new RangeError(`chunk must be 1..${PAYLOAD_MAX}, got ${chunk}`)
   const data = Uint8Array.from(payload)
   const parts = data.length ? chunkBytes(data, chunk) : [new Uint8Array(0)]
-  if (parts.length > 255) throw new RangeError(`payload of ${data.length} bytes needs ${parts.length} packets (max 255)`)
+  if (parts.length > 255 && !wide) throw new RangeError(`payload of ${data.length} bytes needs ${parts.length} packets (max 255)`)
+  if (parts.length > 0xffff) throw new RangeError(`payload of ${data.length} bytes needs ${parts.length} packets (max 65535)`)
   return parts.map((part, i) => {
     const pkt = new Uint8Array(PACKET_SIZE)
     pkt[0] = commandId & 0xff
     pkt[1] = param & 0xff
     pkt[2] = 0
-    pkt[3] = parts.length
-    pkt[4] = i
+    pkt[3] = parts.length & 0xff
+    pkt[4] = i & 0xff
     pkt[5] = part.length
     pkt.set(part, HEADER_LENGTH)
     return withChecksum(pkt, reportId)

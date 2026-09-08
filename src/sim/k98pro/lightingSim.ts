@@ -13,6 +13,14 @@ export class LightingSimState {
   readonly customColors = new Map<number, [number, number, number]>()
   /** Every streamed `0x08` payload, for tests. */
   readonly streamed: { sub: number; data: number[] }[] = []
+  /** LED-bead table (`0xA1`): every key owns one bead except the wide keys listed here (key id → LED count). */
+  beadsSupported = true
+  wideKeys: Record<number, number> = { 70: 3, 27: 2, 54: 2, 55: 2, 66: 2 } // Space ×3; Backspace, Enter, both Shifts ×2
+  beads(id: number): { row: number; col: number }[] {
+    const n = this.wideKeys[id] ?? 1
+    const base = (id - 1) * 3
+    return Array.from({ length: n }, (_, k) => ({ row: Math.floor((base + k) / 32) & 7, col: (base + k) % 32 }))
+  }
   sideLight = true
   logoLight = false
   sideLightCount = 2
@@ -21,9 +29,20 @@ export class LightingSimState {
 }
 
 export function installLightingSim(fw: K98ProFirmware, state = new LightingSimState()): LightingSimState {
+  if (state.beadsSupported) fw.featureBytes[9] = fw.featureBytes[9]! | 0b11100 // ledBeadTable565 + ledBeadRGB565
   fw.extensions.push((p, raw) => {
     const data = decodePayload(raw)
     switch (p.commandId) {
+      case Cmd.GetLedBeads: {
+        if (!state.beadsSupported) return [fw.reply(raw, Array.from(data))] // firmware without a table echoes the request
+        const out: number[] = []
+        for (let i = 0; i + 1 < data.length; i += 2) {
+          const id = readU16be(data, i)
+          const beads = state.beads(id)
+          out.push(...u16be(id), beads.length, ...beads.map((b) => (b.row & 7) | ((b.col & 31) << 3)))
+        }
+        return [fw.reply(raw, out)]
+      }
       case Cmd.DeviceInfo:
         if (p.param !== Info.LightingSupport) return undefined
         {

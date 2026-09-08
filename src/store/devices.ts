@@ -1,8 +1,13 @@
 /**
  * Device store: authorized/connected devices, their drivers, and the WebHID lifecycle.
  * Drivers are kept in a module-level map (they hold sockets and timers, not state to render).
+ * Every connected device is also registered with the music engine as a lighting sink, and unregistered when it
+ * goes away, so the Music Sync page never has to create sinks itself.
  */
 import { create } from 'zustand'
+import { musicEngine } from '@/audio/musicSync'
+import { KeyboardSink } from '@/audio/sinks/keyboardSink'
+import { MouseSink } from '@/audio/sinks/mouseSink'
 import { getAuthorizedDevices, hidSupported, onHidConnectionChange, requestDevices } from '@/hid/core/matchers'
 import { CompxMouseDriver } from '@/drivers/compx/driver'
 import { K98ProDriver } from '@/drivers/k98pro/driver'
@@ -32,6 +37,32 @@ export function getMouseDriver(id: string): MouseDriver | undefined {
 
 function deviceId(d: HIDDevice, product: ProductInfo): string {
   return `${product.slug}:${d.vendorId.toString(16)}:${d.productId.toString(16)}`
+}
+
+/**
+ * Registers `driver` with the music engine. A keyboard sink needs the layout, so the capabilities are read first;
+ * if the driver was replaced or dropped meanwhile (reconnect race) nothing is added. `addSink` releases a previous
+ * sink with the same id, so a reconnect never leaves two sinks for one device.
+ */
+async function registerSink(id: string, driver: AnyDriver, label: string): Promise<void> {
+  try {
+    const sink =
+      driver.kind === 'keyboard'
+        ? new KeyboardSink(id, label, driver, (await driver.capabilities()).layout)
+        : new MouseSink(id, label, driver)
+    if (drivers.get(id) !== driver) return
+    musicEngine.addSink(sink)
+  } catch {
+    /* a device that cannot report its layout is still usable for everything else */
+  }
+}
+
+/** Restores the device's own lighting while its transport is still open, then drops the sink. */
+async function unregisterSink(id: string): Promise<void> {
+  const sink = musicEngine.getSink(id)
+  if (!sink) return
+  if (musicEngine.getStatus().running) await sink.release().catch(() => undefined)
+  musicEngine.removeSink(id)
 }
 
 interface DevicesState {
@@ -75,6 +106,8 @@ export const useDevices = create<DevicesState>((set, get) => ({
         register(device, set)
         void get().connect(id)
       } else if (get().devices[id]) {
+        // The transport is already gone: no restore possible, just drop the sink.
+        musicEngine.removeSink(id)
         drivers.get(id)?.disconnect().catch(() => undefined)
         drivers.delete(id)
         get().patch(id, { state: 'disconnected', battery: undefined })
@@ -110,14 +143,21 @@ export const useDevices = create<DevicesState>((set, get) => ({
     get().patch(id, { state: 'connecting', error: undefined })
     try {
       const existing = drivers.get(id)
-      if (existing) await existing.disconnect().catch(() => undefined)
+      if (existing) {
+        await unregisterSink(id)
+        await existing.disconnect().catch(() => undefined)
+      }
       const driver: AnyDriver = summary.kind === 'keyboard' ? await K98ProDriver.open(hid) : await CompxMouseDriver.open(hid, summary.link)
       drivers.set(id, driver)
       await driver.connect()
       const [info, battery] = await Promise.all([driver.info(), driver.battery().catch(() => undefined)])
       driver.on('battery', (b: BatteryStatus) => get().patch(id, { battery: b }))
-      driver.on('disconnected', () => get().patch(id, { state: 'disconnected' }))
+      driver.on('disconnected', () => {
+        musicEngine.removeSink(id)
+        get().patch(id, { state: 'disconnected' })
+      })
       get().patch(id, { state: 'connected', info, battery })
+      await registerSink(id, driver, summary.product.displayName)
     } catch (error) {
       drivers.delete(id)
       get().patch(id, { state: 'error', error: (error as Error).message })
@@ -125,6 +165,7 @@ export const useDevices = create<DevicesState>((set, get) => ({
   },
 
   async disconnect(id) {
+    await unregisterSink(id)
     const d = drivers.get(id)
     drivers.delete(id)
     if (d) await d.disconnect().catch(() => undefined)
@@ -161,6 +202,7 @@ export const useDevices = create<DevicesState>((set, get) => ({
     const [info, battery] = await Promise.all([driver.info(), driver.battery().catch(() => undefined)])
     driver.on('battery', (b: BatteryStatus) => get().patch(id, { battery: b }))
     get().patch(id, { state: 'connected', info, battery })
+    await registerSink(id, driver, product.displayName)
     return id
   },
 }))
