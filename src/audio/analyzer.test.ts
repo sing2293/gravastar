@@ -74,6 +74,28 @@ describe('presets', () => {
     }
   })
 
+  it('Spectrum rows puts bass at the bottom and treble at the top', () => {
+    const ctx = { layout: LAYOUTS.us, t: 0, color: { r: 255, g: 0, b: 0 }, sensitivity: 1 }
+    const bassy = { ...frame, bands: Float32Array.from({ length: 24 }, (_, i) => (i < 6 ? 0.9 : 0)), beat: false, beatStrength: 0 }
+    const out = PRESETS.find((p) => p.id === 'spectrumRows')!.render(bassy, ctx)
+    if (!('keys' in out)) throw new Error('per key')
+    const sum = (id: number) => {
+      const c = out.keys.find((k) => k.id === id)!.color
+      return c.r + c.g + c.b
+    }
+    expect(sum(70)).toBeGreaterThan(0) // Space — bottom row lit by the bass bands
+    expect(sum(1)).toBe(0) // Esc — no treble → top row dark
+    const trebly = { ...bassy, bands: Float32Array.from({ length: 24 }, (_, i) => (i >= 18 ? 0.9 : 0)) }
+    const top = PRESETS.find((p) => p.id === 'spectrumRows')!.render(trebly, ctx)
+    if ('keys' in top) {
+      const esc = top.keys.find((k) => k.id === 1)!.color
+      const space = top.keys.find((k) => k.id === 70)!.color
+      expect(esc.r + esc.g + esc.b).toBeGreaterThan(0)
+      expect(space.r + space.g + space.b).toBe(0)
+    }
+    expect(PRESETS.map((p) => p.id).slice(0, 3)).toEqual(['rise', 'spectrumRows', 'spectrum'])
+  })
+
   it('hsv converts primaries', () => {
     expect(hsv(0, 1, 1)).toEqual({ r: 255, g: 0, b: 0 })
     expect(hsv(1 / 3, 1, 1)).toEqual({ r: 0, g: 255, b: 0 })

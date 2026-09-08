@@ -104,6 +104,27 @@ export const PRESETS: MusicPreset[] = [
     },
   },
   {
+    id: 'spectrumRows',
+    name: 'Spectrum rows (bottom → top)',
+    description: 'Rainbow spectrum stacked from bass at the bottom row to treble at the top; each row glows with its band, beats flash the bottom.',
+    usesColor: false,
+    render(frame, ctx) {
+      const keys: PerKeyColor[] = []
+      const n = frame.bands.length
+      for (const { key, y } of positions(ctx.layout)) {
+        const band = Math.min(n - 1, Math.floor(y * n))
+        let glow = clamp01(frame.bands[band]! * ctx.sensitivity * 1.6)
+        if (frame.beat && y < 0.18) glow = Math.max(glow, 0.7 * frame.beatStrength)
+        // Red at the bottom, violet at the top, the whole rainbow drifting slowly upward.
+        keys.push({ id: key.id, color: scale(hsv((y * 0.8 + ctx.t * 0.05) % 1, 1, 1), glow) })
+      }
+      return { keys }
+    },
+    accent(frame, ctx) {
+      return { color: hsv((dominantHue(frame) * 0.8 + ctx.t * 0.05) % 1, 1, 1), intensity: clamp01(frame.level * ctx.sensitivity) }
+    },
+  },
+  {
     id: 'spectrum',
     name: 'Spectrum columns (side → side)',
     description: 'One frequency band per column, left → right, each rising with its loudness; rainbow across the board.',

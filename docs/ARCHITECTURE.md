@@ -30,7 +30,10 @@ src/
   by usage page and read the report ID off the output-report collection).
 - `registry.ts`: known products → `{ displayName, kind, image, connection: 'wired'|'wireless', createDriver() }`.
   The K98 Pro registers two PIDs (wired `0x10E5`, 2.4G dongle `0x106C`); connection type is decided by PID, not by
-  asking the user.
+  asking the user. **One `HIDDevice` = one HID interface**, and a mouse has several (pointer, keyboard/consumer,
+  vendor); `isControlInterface` keeps only the vendor one — the collection pairing one input with one output report
+  `0x08`, Compx HUB's rule — and the transport refuses to open an interface that lacks the output report. First
+  hardware contact with a mouse failed with Chrome's "Failed to write the report" for exactly this reason.
 
 ### `drivers/*` — one folder per protocol family
 Rules that apply to every driver:
@@ -70,10 +73,13 @@ is JSON of these types; vendor profile files are converted at the edge.
   colour/intensity for single-light devices. Sinks pace themselves and drop frames when the device is busy; the
   engine never awaits a sink. Presets live in `presets.ts` and provide both `render` (per-key) and `accent`.
 - Keyboard sink: ≤ 30 Hz streaming, custom effect entered on `prepare`, previous zone record restored on `release`.
-  On `prepare` it reads the firmware's **LED-bead table** (`0xA1`: which physical LEDs each key owns — Space has
-  three, Backspace/Enter/Shift two) and, when present, addresses LEDs (`0x08/0x04` grouped RGB565 bead ids; the
-  sorted full table `0x08/0x03` on the dongle). The per-key command (`0x08/0x01`) lights one LED per key and is the
-  fallback. Verified on hardware: with per-key streaming only one of the space bar's LEDs lit.
+  On `prepare` it reads the firmware's **LED-bead table** (`0xA1`: which physical LEDs each key owns) and, when
+  present, addresses LEDs (`0x08/0x04` grouped RGB565 bead ids; the sorted full table `0x08/0x03` on the dongle).
+  The per-key command (`0x08/0x01`) lights one LED per key and is the fallback. **LED aliases** (`layout.ts`): the
+  PCB is shared between the US/UK/JP legend variants, so the US space bar sits over the JP 無変換/変換/かな/英数
+  positions (ids 106/107/109/110) and has five LEDs while the keymap only knows id 70; every hidden id of another
+  variant is aliased to the visible key whose area contains it, and both streaming and the custom-colour writes
+  expand colours through those aliases. Hardware: with per-key streaming only one of the five space-bar LEDs lit.
 - `clock.ts`: the analysis loop is ticked from the **audio thread** (a ScriptProcessorNode on the capture graph), not
   `requestAnimationFrame`: rAF stops and timers drop to 1 Hz when the tab is hidden, and music sync must keep going
   while the user is in another app. The tab still has to stay open — the keyboard has no microphone and none of its

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { chunk, concat, hex, padTo, readU16be, readU16le, sum8, u16be, u16le } from './bytes'
 import { SerialQueue, TimeoutError, retry, sleep, withTimeout } from './request'
-import { findOutputReportId, matchesFilter } from './matchers'
+import { describeCollections, findOutputReportId, hasOutputReport, hasReportPair, matchesFilter } from './matchers'
 import { WebHidTransport, waitForReport } from './transport'
 import { FakeHidDevice } from './testing/fakeHidDevice'
 
@@ -85,6 +85,29 @@ describe('matchers', () => {
   it('finds the output report id of the raw-HID collection', () => {
     expect(findOutputReportId(device, { usagePage: 0xff60, usage: 0x61 })).toBe(0)
     expect(findOutputReportId(device, { usagePage: 0xff61 })).toBeUndefined()
+  })
+})
+
+describe('mouse interface selection', () => {
+  // A Compx mouse: pointer interface, keyboard/consumer interface, vendor interface with report 0x08 (in + out).
+  const pointer = { usagePage: 1, usage: 2, inputReports: [{ reportId: 1 }], outputReports: [] }
+  const consumer = { usagePage: 1, usage: 6, inputReports: [{ reportId: 2 }, { reportId: 3 }], outputReports: [{ reportId: 2 }] }
+  const vendor = { usagePage: 0xff00, usage: 1, inputReports: [{ reportId: 8 }], outputReports: [{ reportId: 8 }] }
+  it('picks the interface with one input + one output report 0x08, like Compx HUB', () => {
+    expect(hasReportPair({ collections: [pointer] }, 8)).toBe(false)
+    expect(hasReportPair({ collections: [consumer] }, 8)).toBe(false)
+    expect(hasReportPair({ collections: [vendor] }, 8)).toBe(true)
+    expect(hasOutputReport({ collections: [pointer, consumer] }, 8)).toBe(false)
+    expect(hasOutputReport({ collections: [vendor] }, 8)).toBe(true)
+    expect(describeCollections({ collections: [consumer] })).toBe('0x1/0x6 in[0x02,0x03] out[0x02]')
+  })
+  it('the transport refuses an interface that cannot carry the report', async () => {
+    const fake = Object.assign(new FakeHidDevice('Mouse (pointer interface)'), { collections: [pointer] })
+    await expect(WebHidTransport.open(fake, 8)).rejects.toThrow(/no output report 0x08/)
+    const ok = Object.assign(new FakeHidDevice('Mouse (vendor interface)'), { collections: [vendor] })
+    const t = await WebHidTransport.open(ok, 8)
+    expect(t.opened).toBe(true)
+    await t.close()
   })
 })
 

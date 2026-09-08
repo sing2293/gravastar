@@ -7,7 +7,7 @@ export interface HidFilter {
   usage?: number
 }
 
-type CollectionLike = Pick<HIDCollectionInfo, 'usagePage' | 'usage'> & {
+export type CollectionLike = Pick<HIDCollectionInfo, 'usagePage' | 'usage'> & {
   outputReports?: ReadonlyArray<Pick<HIDReportInfo, 'reportId'>>
   inputReports?: ReadonlyArray<Pick<HIDReportInfo, 'reportId'>>
 }
@@ -45,6 +45,27 @@ export function findOutputReportId(device: DeviceLike, filter: Pick<HidFilter, '
     return first ? (first.reportId ?? 0) : 0
   }
   return undefined
+}
+
+/**
+ * Compx HUB's interface rule (HIDHandle.js `Request_Device`): a mouse exposes several HID interfaces (pointer,
+ * keyboard/consumer, vendor) and `requestDevice` returns one `HIDDevice` per interface; the configurable one is the
+ * interface with a top-level collection that has exactly one input and one output report, the output being
+ * `reportId`. Writing to any other interface fails with "Failed to write the report".
+ */
+export function hasReportPair(device: Pick<DeviceLike, 'collections'>, reportId: number): boolean {
+  return device.collections.some((c) => c.inputReports?.length === 1 && c.outputReports?.length === 1 && (c.outputReports[0]!.reportId ?? 0) === reportId)
+}
+
+/** Whether any collection declares an output report with this id (0 = un-numbered). */
+export function hasOutputReport(device: Pick<DeviceLike, 'collections'>, reportId: number): boolean {
+  return device.collections.some((c) => (c.outputReports ?? []).some((r) => (r.reportId ?? 0) === reportId))
+}
+
+/** One line per collection, for error messages: `usagePage/usage in[ids] out[ids]`. */
+export function describeCollections(device: Pick<DeviceLike, 'collections'>): string {
+  const ids = (list?: ReadonlyArray<Pick<HIDReportInfo, 'reportId'>>) => (list ?? []).map((r) => `0x${(r.reportId ?? 0).toString(16).padStart(2, '0')}`).join(',')
+  return device.collections.map((c) => `0x${(c.usagePage ?? 0).toString(16)}/0x${(c.usage ?? 0).toString(16)} in[${ids(c.inputReports)}] out[${ids(c.outputReports)}]`).join('; ')
 }
 
 export function hidSupported(): boolean {

@@ -1,4 +1,5 @@
 import type { BeadColor, KeyboardDriver, KeyboardLayout, LedBead, PerKeyColor, ZoneLighting } from '@/model/keyboard'
+import { expandLedAliases, ledIds } from '@/drivers/k98pro/layout'
 import { presetById } from '../presets'
 import type { LightingFrame, LightingSink, MusicFrame, SinkStatus } from '../types'
 
@@ -38,7 +39,7 @@ export class KeyboardSink implements LightingSink {
     this.previous = await this.driver.lighting.get('main')
     if (caps.customEffectId !== undefined && this.previous.effectId !== caps.customEffectId) await this.driver.lighting.setEffect('main', caps.customEffectId)
     this.mode = caps.streaming.perKey ? 'per-key streaming' : caps.streaming.fullKeys ? 'whole-board streaming' : 'streaming (unreported by firmware)'
-    this.note = undefined
+    this.note = this.aliasNote().replace(/^; /, '') || undefined
     this.beads = undefined
     if (caps.streaming.beads) await this.loadBeads()
     this.active = true
@@ -55,20 +56,30 @@ export class KeyboardSink implements LightingSink {
    */
   private async loadBeads(): Promise<void> {
     try {
-      const table = await this.driver.lighting.getLedBeads(this.layout.keys.map((k) => k.id))
+      const table = await this.driver.lighting.getLedBeads(ledIds(this.layout))
       if (!table.length) return
       this.beads = new Map(table.map((k) => [k.id, k.beads]))
       const total = table.reduce((n, k) => n + k.beads.length, 0)
       const label = (id: number) => this.layout.keys.find((k) => k.id === id)?.label ?? `#${id}`
       const wide = table.filter((k) => k.beads.length > 1).map((k) => `${label(k.id)} ×${k.beads.length}`)
       this.mode = 'per-LED streaming'
-      this.note = `${total} LEDs on ${table.length} keys${wide.length ? ` — ${wide.slice(0, 6).join(', ')}${wide.length > 6 ? '…' : ''}` : ''}`
+      this.note = `${total} LEDs on ${table.length} key positions${wide.length ? ` — ${wide.slice(0, 6).join(', ')}${wide.length > 6 ? '…' : ''}` : ''}${this.aliasNote()}`
     } catch {
       /* no bead table: fall back to key ids */
     }
   }
 
-  private sendKeys(keys: PerKeyColor[]): Promise<void> {
+  /** e.g. "Space also drives LEDs 106, 107, 109, 110". */
+  private aliasNote(): string {
+    const a = this.layout.ledAliases ?? {}
+    const parts = Object.entries(a)
+      .filter(([, ids]) => ids?.length)
+      .map(([id, ids]) => `${this.layout.keys.find((k) => k.id === Number(id))?.label ?? id} +${ids!.length}`)
+    return parts.length ? `; hidden LEDs: ${parts.join(', ')}` : ''
+  }
+
+  private sendKeys(perKey: PerKeyColor[]): Promise<void> {
+    const keys = expandLedAliases(this.layout, perKey)
     if (!this.beads) return this.driver.lighting.stream(keys)
     const beads: BeadColor[] = []
     const rest: PerKeyColor[] = []

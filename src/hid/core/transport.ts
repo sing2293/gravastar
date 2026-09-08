@@ -1,3 +1,4 @@
+import { describeCollections, hasOutputReport, type CollectionLike } from './matchers'
 import { deferred, withTimeout } from './request'
 import { toBytes } from './bytes'
 
@@ -54,6 +55,8 @@ export interface HidDeviceLike {
   readonly productName: string
   readonly vendorId: number
   readonly productId: number
+  /** Report descriptor summary (real `HIDDevice`s always have it; fakes may omit it). */
+  readonly collections?: ReadonlyArray<CollectionLike>
   open(): Promise<void>
   close(): Promise<void>
   sendReport(reportId: number, data: BufferSource): Promise<void>
@@ -81,8 +84,14 @@ export class WebHidTransport implements Transport {
     device.addEventListener('inputreport', this.onEvent)
   }
 
-  /** Opens the device if needed and attaches the input-report listener. */
+  /**
+   * Opens the device if needed and attaches the input-report listener. Refuses an interface that does not declare
+   * output report `reportId` — Chrome would otherwise fail every write with the unhelpful "Failed to write the report".
+   */
   static async open(device: HidDeviceLike, reportId: number): Promise<WebHidTransport> {
+    if (device.collections && !hasOutputReport({ collections: device.collections }, reportId)) {
+      throw new Error(`${device.productName}: this HID interface has no output report 0x${reportId.toString(16).padStart(2, '0')} (collections: ${describeCollections({ collections: device.collections }) || 'none'})`)
+    }
     if (!device.opened) await device.open()
     return new WebHidTransport(device, reportId)
   }

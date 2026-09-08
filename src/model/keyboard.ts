@@ -55,6 +55,8 @@ export interface KeyboardLayout {
   keys: LayoutKey[]
   rows: number
   columns: number
+  /** Visible key id → ids of keys that exist on other legend variants and whose LEDs sit under this key. */
+  ledAliases?: Partial<Record<KeyId, KeyId[]>>
 }
 
 export interface KeyBinding {

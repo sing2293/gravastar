@@ -11,7 +11,7 @@ import { MouseSink } from '@/audio/sinks/mouseSink'
 import { getAuthorizedDevices, hidSupported, onHidConnectionChange, requestDevices } from '@/hid/core/matchers'
 import { CompxMouseDriver } from '@/drivers/compx/driver'
 import { K98ProDriver } from '@/drivers/k98pro/driver'
-import { HID_FILTERS, K98_PRO, MICE, identify } from '@/drivers/registry'
+import { HID_FILTERS, K98_PRO, MICE, identify, isControlInterface } from '@/drivers/registry'
 import type { BatteryStatus, DeviceSummary, ProductInfo } from '@/model/device'
 import type { KeyboardDriver } from '@/model/keyboard'
 import type { MouseDriver } from '@/model/mouse'
@@ -210,6 +210,8 @@ export const useDevices = create<DevicesState>((set, get) => ({
 function register(d: HIDDevice, set: (fn: (s: DevicesState) => Partial<DevicesState>) => void): string | undefined {
   const ident = identify(d)
   if (!ident) return undefined
+  // A mouse shows up as several HID interfaces; only the vendor one carries report 0x08.
+  if (!isControlInterface(d, ident)) return undefined
   const id = deviceId(d, ident.product)
   hidDevices.set(id, d)
   set((s) => {

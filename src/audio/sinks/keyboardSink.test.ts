@@ -47,7 +47,7 @@ describe('KeyboardSink over the simulated K98 Pro', () => {
     expect(sim.lighting.zones.get(Setting.MainEffect)![0]).toBe(19)
     // the simulated firmware exposes its LED-bead table, so the sink addresses LEDs (Space owns three)
     expect(sink.status()).toMatchObject({ active: true, mode: 'per-LED streaming', writes: 0, error: undefined })
-    expect(sink.status().note).toMatch(/104 LEDs on 98 keys — .*Space ×3/)
+    expect(sink.status().note).toMatch(/114 LEDs on 108 key positions — .*Space ×3.*hidden LEDs: .*Space \+4/)
 
     await sink.release()
     expect(sim.lighting.zones.get(Setting.MainEffect)).toEqual(before)
@@ -86,6 +86,7 @@ describe('KeyboardSink over the simulated K98 Pro', () => {
     expect(sim.lighting.streamed[0]!.sub).toBe(4) // grouped bead ids (0x08/0x04)
     const beadIds = sim.lighting.streamed.flatMap((s) => s.data)
     for (const b of sim.lighting.beads(70)) expect(beadIds).toContain((b.row & 7) | ((b.col & 31) << 3)) // every LED of Space
+    for (const alias of [106, 107, 109, 110]) for (const b of sim.lighting.beads(alias)) expect(beadIds).toContain((b.row & 7) | ((b.col & 31) << 3)) // JP key positions under the US space bar
     expect(sink.status().writes).toBe(1)
     await sink.release()
   })
@@ -98,6 +99,17 @@ describe('KeyboardSink over the simulated K98 Pro', () => {
     sink.push(frame(1000, 'spectrum'))
     await tick()
     expect(sim.lighting.streamed[0]!.sub).toBe(1)
+    // per-key frames carry the hidden ids under the space bar as well
+    const ids = new Set<number>()
+    for (const s of sim.lighting.streamed) {
+      const d = s.data
+      for (let i = 0; i + 3 < d.length; ) {
+        const n = d[i + 3]!
+        for (let k = 0; k < n; k++) ids.add(d[i + 4 + k]!)
+        i += 4 + n
+      }
+    }
+    for (const id of [70, 106, 107, 109, 110]) expect(ids.has(id)).toBe(true)
     await sink.release()
   })
 })

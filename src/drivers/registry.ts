@@ -3,8 +3,9 @@
  * K98 Pro from GS HUB (docs/reverse-engineering/k98pro/01-transport.md §1), mice from GS HUB's device registry
  * and Compx HUB's live `cfg.json` (docs/reverse-engineering/mouse/01-transport-commands.md §1).
  */
-import type { HidFilter } from '@/hid/core/matchers'
+import { hasReportPair, type CollectionLike, type HidFilter } from '@/hid/core/matchers'
 import type { LinkType, ProductInfo } from '@/model/device'
+import { REPORT_ID as COMPX_REPORT_ID } from './compx/frame'
 import { PID_DONGLE, PID_WIRED, USAGE, USAGE_PAGE, VENDOR_ID as K98_VID } from './k98pro/enums'
 
 export const COMPX_VID = 0x3554
@@ -58,6 +59,18 @@ export const HID_FILTERS: HidFilter[] = [
 export interface Identification {
   product: ProductInfo
   link: LinkType
+}
+
+/**
+ * Whether this `HIDDevice` (= one HID interface) is the one the driver talks to. The K98 Pro's is the raw-HID
+ * collection (`0xFF60/0x61`, already what the filters select); a Compx mouse's is the interface whose collection
+ * pairs one input report with one output report `0x08` (Compx HUB's rule). Devices without collection info
+ * (test fakes) are accepted.
+ */
+export function isControlInterface(device: { collections?: ReadonlyArray<CollectionLike> }, ident: Identification): boolean {
+  if (!device.collections) return true
+  if (ident.product.kind === 'keyboard') return device.collections.some((c) => c.usagePage === USAGE_PAGE && c.usage === USAGE)
+  return hasReportPair({ collections: device.collections }, COMPX_REPORT_ID)
 }
 
 const normalize = (name: string | undefined): string => (name ?? '').replace(/[^a-z0-9]/gi, '').toUpperCase()

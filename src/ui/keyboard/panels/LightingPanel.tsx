@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { RGB } from '@/model/device'
 import type { KeyId, LightZone, LightingCapabilities, PerKeyColor, ZoneLighting } from '@/model/keyboard'
 import { Button, Card, Field, Notice, Select, Slider, Tabs, Toggle, hexToRgb, rgbToHex } from '@/ui/components/kit'
+import { expandLedAliases } from '@/drivers/k98pro/layout'
 import { KeyboardStage } from '../KeyboardStage'
 import type { KeyboardPanelProps } from '../KeyboardPage'
 
@@ -97,7 +98,7 @@ export function LightingPanel({ driver, caps: kbCaps }: KeyboardPanelProps) {
   const paintKeys = async (colors: PerKeyColor[]) => {
     setBusy(true)
     try {
-      await driver.lighting.setCustomColors(colors)
+      await driver.lighting.setCustomColors(expandLedAliases(kbCaps.layout, colors))
       setCustom((m) => {
         const n = new Map(m)
         for (const c of colors) n.set(c.id, c.color)
