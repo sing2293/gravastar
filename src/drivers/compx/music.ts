@@ -136,6 +136,8 @@ export interface CompxMusicHost {
 export class CompxMusic implements MouseMusicService {
   /** Settings-memory write frames issued by `setLightColor` this session (`restore`'s own ≤ 3 writes are not counted). */
   flashWrites = 0
+  /** Whether `enterLightSession` had to clear the firmware's "light off while moving" byte. */
+  private movingOffCleared = false
   /** 0xB6 frames sent (fire-and-forget, never confirmed). */
   amplitudeFrames = 0
   private caps: MouseMusicCapabilities | undefined
@@ -201,6 +203,24 @@ export class CompxMusic implements MouseMusicService {
     }
   }
 
+  /**
+   * The light only animates if it is on *and* the firmware is not blanking it while the mouse moves — which it does
+   * by default on most models, so a host-driven strobe would be invisible exactly while the mouse is in use.
+   */
+  async enterLightSession(): Promise<void> {
+    await this.snapshot()
+    const cur = await this.host.lighting.get()
+    if (cur.offWhileMoving) {
+      this.flashWrites++
+      await this.host.lighting.set({ offWhileMoving: false })
+      this.movingOffCleared = true
+    }
+    if (!cur.on) {
+      this.flashWrites++
+      await this.host.hid.writeValue(Addr.LightState, 1)
+    }
+  }
+
   /** 0x19; `undefined` when the receiver has no bar. */
   async readDongleBar(): Promise<DongleBar | undefined> {
     const reply = await this.host.hid.command(Command.GetDongleRGBBarMode)
@@ -244,6 +264,12 @@ export class CompxMusic implements MouseMusicService {
       await attempt(async () => {
         await this.restoreLight(light, wasAmplitude)
         this.lightSnapshot = undefined
+      })
+    }
+    if (this.movingOffCleared) {
+      await attempt(async () => {
+        await this.host.lighting.set({ offWhileMoving: true })
+        this.movingOffCleared = false
       })
     }
     if (failure) throw failure

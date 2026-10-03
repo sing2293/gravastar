@@ -248,6 +248,12 @@ export interface MouseMusicService {
   /** 0x18: receiver RGB bar. */
   setDongleBar(bar: DongleBar): Promise<void>
   /**
+   * Makes the body light visible for a session: switched on, and not auto-extinguished while the mouse moves
+   * (`offWhileMoving`, EEPROM `0xB3`) — otherwise every animation disappears the moment a hand touches the mouse.
+   * Writes only what differs; `restore` puts both back.
+   */
+  enterLightSession(): Promise<void>
+  /**
    * Light-bar block write in settings memory (mode included, so the firmware's own breathing can be used instead of
    * driving every frame from the host). Callers MUST rate-limit and budget these writes.
    */

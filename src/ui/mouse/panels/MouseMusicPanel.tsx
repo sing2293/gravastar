@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { musicEngine } from '@/audio/musicSync'
 import { MouseSink, type MouseSinkOptions } from '@/audio/sinks/mouseSink'
-import { Field, Notice, Select, Slider } from '@/ui/components/kit'
+import { Button, Field, Notice, Select, Slider } from '@/ui/components/kit'
 import { DevicesCard, LiveCard, LookCard, MOUSE_MEMORY_NOTE, SourceCard, useMusicStatus, useMusicUi } from '@/ui/music'
 import type { MousePanelProps } from '../MousePage'
 
@@ -11,7 +11,7 @@ type Path = NonNullable<MouseSinkOptions['prefer']>
 const PATHS: { value: Path; label: string }[] = [
   { value: 'auto', label: 'Automatic — the most reactive path this mouse supports' },
   { value: 'pulse', label: 'Pulse — the mouse breathes at the beat (recommended)' },
-  { value: 'strobe', label: 'Strobe — flash on every beat (many memory writes)' },
+  { value: 'strobe', label: 'Strobe — flash on every beat (most memory writes)' },
   { value: 'gentle', label: 'Gentle — colour change on strong beats only' },
   { value: 'amplitude', label: 'Amplitude streaming (0xB6) — if the firmware accepts it' },
   { value: 'dongle', label: 'Receiver RGB bar only (0x18) — 2.4 GHz receiver' },
@@ -19,7 +19,7 @@ const PATHS: { value: Path; label: string }[] = [
 
 const HINTS: Partial<Record<Path, string>> = {
   pulse: 'The light block is set to the firmware’s breathing mode at the detected tempo, so the mouse keeps pulsing on its own; it is only rewritten when the colour or tempo changes.',
-  strobe: 'The host writes the light several times per beat so it punches and fades. The most reactive — and the hardest on the mouse’s settings memory. Watch the write counter.',
+  strobe: 'Driven entirely from this computer: each beat writes the light on, then off again a moment later, so it blinks with the music. The most reactive — and the hardest on the mouse’s settings memory, at two writes per beat.',
   gentle: 'One colour change per strong beat, at most one write every 1.5 s. Least wear, least movement.',
   amplitude: 'A live 20-band command that costs no memory. Documented for Compx keyboards; most mice reject it.',
   dongle: 'Drives only the receiver’s RGB bar and leaves the mouse’s own light alone.',
@@ -33,6 +33,8 @@ export function MouseMusicPanel({ id, caps }: MousePanelProps) {
   const sink = impl instanceof MouseSink ? impl : undefined
   const [path, setPath] = useState<Path>(sink?.options.prefer ?? 'auto')
   const [speedOffset, setSpeedOffset] = useState(sink?.options.pulseSpeedOffset ?? 0)
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState<string>()
   // The store registers the sink asynchronously; pick up its options once it exists.
   useEffect(() => {
     if (!sink) return
@@ -42,6 +44,31 @@ export function MouseMusicPanel({ id, caps }: MousePanelProps) {
   const mine = status.sinks.find((s) => s.id === id)
   const pulsing = mine?.mode === 'pulse (firmware breathing)'
   const bpm = sink?.tempoEstimate.bpm
+
+  const choosePath = (v: Path) => {
+    setPath(v)
+    if (!sink) return
+    sink.options = { ...sink.options, prefer: v }
+    // A running session keeps the strategy it prepared with, so re-prepare this device right away.
+    void musicEngine.refreshSink(id)
+  }
+
+  const runFlashTest = async () => {
+    if (!sink) return
+    setTesting(true)
+    setTestResult(undefined)
+    try {
+      const { writes, writeMs } = await sink.flashTest({ r: 255, g: 255, b: 255 })
+      setTestResult(
+        `Blinked 6 times (${writes} memory writes, ${writeMs} ms per write — up to ${Math.floor(1000 / Math.max(1, writeMs))} writes/s). If the mouse did not visibly flash, its light bar does not follow live writes.`,
+      )
+    } catch (e) {
+      setTestResult(`Flash test failed: ${(e as Error).message}`)
+    } finally {
+      if (!musicEngine.getStatus().running) await sink.release().catch(() => undefined)
+      setTesting(false)
+    }
+  }
   return (
     <div className="music-stack">
       <Notice kind="info">
@@ -50,11 +77,12 @@ export function MouseMusicPanel({ id, caps }: MousePanelProps) {
       </Notice>
       {path === 'strobe' && (
         <Notice>
-          Strobe rewrites the mouse’s settings memory several times per beat — roughly {Math.round((sink?.options.strobeFps ?? 8) * 60)} writes a minute at
-          full tilt. Flash endurance is not published for these mice, so use it for a track or two rather than a whole
-          evening; the session pauses at the write budget.
+          Strobe writes the mouse’s settings memory twice per beat — about 240 writes a minute at 120 BPM. Flash
+          endurance is not published for these mice, so use it for a track or two rather than a whole evening; the
+          session pauses at the write budget.
         </Notice>
       )}
+      {testResult && <Notice kind="info">{testResult}</Notice>}
       {startError && <Notice kind="error">{startError}</Notice>}
       {status.error && <Notice kind="error">{status.error}</Notice>}
       <div className="grid cols-2">
@@ -62,21 +90,24 @@ export function MouseMusicPanel({ id, caps }: MousePanelProps) {
         <LookCard>
           <Field
             label="Mouse light"
-            hint={
-              mine?.active && path !== (sink?.options.prefer ?? 'auto')
-                ? 'Applies the next time music sync starts.'
-                : (HINTS[path] ?? 'Tried first; a path the mouse does not support falls back to the automatic order.')
-            }
+            hint={HINTS[path] ?? 'Tried first; a path the mouse does not support falls back to the automatic order.'}
           >
-            <Select
-              value={path}
-              options={PATHS}
-              disabled={!sink}
-              onChange={(v) => {
-                setPath(v)
-                if (sink) sink.options = { ...sink.options, prefer: v }
-              }}
-            />
+            <Select value={path} options={PATHS} disabled={!sink} onChange={choosePath} />
+          </Field>
+          <Field
+            label="Is the light reacting?"
+            hint="Blinks the mouse white six times with no audio. It separates “the light does not follow live writes” from “the beat is not being detected”, and measures how fast this mouse accepts writes."
+          >
+            <div className="row">
+              <Button disabled={!sink || testing} onClick={() => void runFlashTest()}>
+                {testing ? 'Flashing…' : 'Flash the mouse 6 times'}
+              </Button>
+              {mine?.active && sink && sink.writeLatencyMs > 0 && (
+                <span className="dim" style={{ fontSize: 12 }}>
+                  {sink.writeLatencyMs} ms per write
+                </span>
+              )}
+            </div>
           </Field>
           {(path === 'pulse' || path === 'auto' || pulsing) && (
             <Field

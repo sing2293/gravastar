@@ -107,6 +107,17 @@ export class MusicSyncEngine {
     return this.sinks.get(id)?.sink
   }
 
+  /**
+   * Applies a sink's changed options to a running session: releases it and prepares it again. Without this a
+   * strategy picked mid-session would only take effect at the next start.
+   */
+  async refreshSink(id: string): Promise<void> {
+    const entry = this.sinks.get(id)
+    if (!entry || !this.status.running || !entry.enabled) return
+    await entry.sink.release().catch(() => undefined)
+    await this.prepareSink(entry.sink)
+  }
+
   private async prepareSink(sink: LightingSink): Promise<void> {
     try {
       await sink.prepare()

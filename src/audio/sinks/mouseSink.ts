@@ -15,8 +15,9 @@
  *                   animates the fade, so the mouse keeps pulsing with no further writes; the host only rewrites
  *                   the block when the colour or the tempo-derived speed actually changes. Visibly beat-driven at
  *                   a fraction of the memory writes of host-driven animation. Default for the body light.
- *   4. strobe     — host-driven flash: fixed-colour mode rewritten several times per second so each beat punches
- *                   and decays. The most reactive and by far the most memory writes — opt-in, budgeted.
+ *   4. strobe     — host-driven flash, entirely in software: a beat writes the block at full brightness, and
+ *                   `strobeOnMs` later a second write puts it out again, so the light blinks once per beat. Two
+ *                   memory writes per beat — the most reactive and by far the most wear — opt-in and budgeted.
  *   5. gentle     — colour change on strong beats only, ≥ `gentleMinIntervalMs` apart; the least wear.
  *
  * The receiver's RGB bar is a command path with no memory cost, so when the receiver has one it is driven
@@ -45,10 +46,12 @@ export interface MouseSinkOptions {
   pulseColorThreshold: number
   /** Pulse mode: nudge for the tempo → firmware speed mapping (−9..9), for tuning against the real device. */
   pulseSpeedOffset: number
-  /** Strobe mode: maximum writes per second. */
+  /** Strobe mode: maximum writes per second (two writes make one blink). */
   strobeFps: number
-  /** Strobe mode: time constant of the flash decay after a beat, ms. */
-  strobeDecayMs: number
+  /** Strobe mode: how long the flash stays lit before the dark frame is written, ms. */
+  strobeOnMs: number
+  /** Strobe mode: beats weaker than this (0..1) do not flash. */
+  strobeBeatThreshold: number
   /** Memory writes allowed per session; the sink pauses itself once reached. */
   writeBudget: number
   /** Strategy to try first; `auto` = amplitude → receiver bar → gentle. An unavailable choice falls back to `auto`. */
@@ -65,8 +68,9 @@ export const DEFAULT_MOUSE_SINK_OPTIONS: MouseSinkOptions = {
   pulseMinIntervalMs: 700,
   pulseColorThreshold: 60,
   pulseSpeedOffset: 0,
-  strobeFps: 8,
-  strobeDecayMs: 140,
+  strobeFps: 14,
+  strobeOnMs: 90,
+  strobeBeatThreshold: 0.12,
   writeBudget: 2000,
   prefer: 'auto',
   accent: { r: 155, g: 255, b: 49 },
@@ -183,6 +187,9 @@ const scaleRgb = (c: RGB, k: number): RGB => ({
 
 const rgbDistance = (a: RGB, b: RGB): number => Math.hypot(a.r - b.r, a.g - b.g, a.b - b.b)
 
+/** Wall clock for measuring device round-trips (frame timestamps are the audio clock). */
+const nowMs = (): number => (typeof performance !== 'undefined' ? performance.now() : Date.now())
+
 /** Whether a new look is different enough from the one the firmware is already running to be worth a write. */
 export function effectChanged(next: MouseLightEffect, last: MouseLightEffect | undefined, colorThreshold: number): boolean {
   if (!last) return true
@@ -194,13 +201,11 @@ export function effectChanged(next: MouseLightEffect, last: MouseLightEffect | u
   )
 }
 
-/**
- * Host-driven flash envelope: a beat snaps it to the onset strength, then it decays exponentially so the light
- * punches and fades between beats. `intensity` keeps a quiet passage dim rather than dark.
- */
-export function strobeLevel(peak: number, sinceBeatMs: number, decayMs: number, intensity: number): number {
-  const decayed = peak * Math.exp(-Math.max(0, sinceBeatMs) / Math.max(1, decayMs))
-  return Math.max(0, Math.min(1, Math.max(decayed, intensity * 0.35)))
+/** The two frames of a software strobe: lit on the beat, dark again `strobeOnMs` later. */
+export function strobeFrame(accent: RGB, lit: boolean): MouseLightEffect {
+  return lit
+    ? { mode: FIXED_COLOR_MODE, color: accent, speed: 0, brightness: LIGHT_BRIGHTNESS_MAX }
+    : { mode: FIXED_COLOR_MODE, color: scaleRgb(accent, 0.06), speed: 0, brightness: 0 }
 }
 
 export class MouseSink implements LightingSink {
@@ -224,8 +229,10 @@ export class MouseSink implements LightingSink {
   private memoryWrites = 0
   private lastEffect: MouseLightEffect | undefined
   private readonly tempo = new TempoTracker()
-  private lastBeatAt = -Infinity
-  private beatPeak = 0
+  /** Strobe: when the current flash was lit, or undefined while dark. */
+  private litSince: number | undefined
+  /** Round-trip of the last settings-memory write, ms — what limits how fast a software strobe can blink. */
+  private writeMs = 0
   /** The receiver bar, driven alongside a body-light strategy. */
   private bar = false
   private barInFlight = false
@@ -255,8 +262,8 @@ export class MouseSink implements LightingSink {
     this.memoryWrites = 0
     this.lastEffect = undefined
     this.tempo.reset()
-    this.lastBeatAt = -Infinity
-    this.beatPeak = 0
+    this.litSince = undefined
+    this.writeMs = 0
     this.bar = false
     this.barInFlight = false
     this.lastBarSend = -Infinity
@@ -298,6 +305,14 @@ export class MouseSink implements LightingSink {
           continue
         }
       }
+      // A body light that the firmware blanks while the mouse moves would make any animation invisible.
+      if (strategy === 'pulse' || strategy === 'strobe' || strategy === 'gentle') {
+        try {
+          await this.music.enterLightSession()
+        } catch (e) {
+          this.note = `could not take over the light (${(e as Error).message})`
+        }
+      }
       // The receiver bar costs no memory, so drive it as well as the body light whenever the receiver has one.
       this.bar = caps.dongleBar
       if (this.bar) this.dongleBase = await this.readDongleBase()
@@ -327,11 +342,7 @@ export class MouseSink implements LightingSink {
   push(frame: MusicFrame): void {
     if (!this.active || !this.music || !this.strategy) return
     const now = frame.audio.time
-    if (frame.audio.beat) {
-      this.tempo.beat(now)
-      this.lastBeatAt = now
-      this.beatPeak = Math.max(0.35, Math.min(1, frame.audio.beatStrength || frame.intensity))
-    }
+    if (frame.audio.beat) this.tempo.beat(now)
     if (this.strategy !== 'dongle') this.pushBar(frame, now)
     if (this.inFlight) return
     let write: Promise<void>
@@ -359,17 +370,16 @@ export class MouseSink implements LightingSink {
         break
       }
       case 'strobe': {
+        // Pure software blink: light up on the onset, write the dark frame once the flash has been seen.
         if (now - this.lastSend < 1000 / this.options.strobeFps) return
-        const level = strobeLevel(this.beatPeak, now - this.lastBeatAt, this.options.strobeDecayMs, frame.intensity)
-        const next: MouseLightEffect = {
-          mode: FIXED_COLOR_MODE,
-          color: scaleRgb(frame.accent, Math.max(0.15, level)),
-          speed: 0,
-          brightness: Math.max(1, Math.round(level * LIGHT_BRIGHTNESS_MAX)),
-        }
-        // Quantised to the byte the device stores: an unchanged frame is not worth an erase cycle.
+        const beat = frame.audio.beat && frame.audio.beatStrength >= this.options.strobeBeatThreshold
+        const lit = beat || (this.litSince !== undefined && now - this.litSince < this.options.strobeOnMs)
+        if (lit && this.litSince === undefined) this.litSince = now
+        if (!lit && this.litSince === undefined) return // already dark and no beat: nothing to write
+        const next = strobeFrame(frame.accent, lit)
         if (!effectChanged(next, this.lastEffect, 12)) return
         if (this.budgetReached()) return
+        if (!lit) this.litSince = undefined
         this.lastEffect = next
         write = this.music.setLightEffect(next)
         memory = true
@@ -395,9 +405,11 @@ export class MouseSink implements LightingSink {
     }
     this.lastSend = now
     this.inFlight = true
+    const startedAt = nowMs()
     write
       .then(() => {
         this.error = undefined
+        if (memory) this.writeMs = Math.round(nowMs() - startedAt)
       })
       .catch((e: Error) => {
         this.error = e.message
@@ -467,6 +479,40 @@ export class MouseSink implements LightingSink {
   /** Settings-memory writes this session — what the write budget counts. */
   get memoryWriteCount(): number {
     return this.memoryWrites
+  }
+
+  /** Round-trip of the last settings-memory write, ms: the ceiling on how fast a software strobe can blink. */
+  get writeLatencyMs(): number {
+    return this.writeMs
+  }
+
+  /**
+   * Blinks the light `times` without any audio, so "is the light reacting at all?" can be answered separately from
+   * "is the beat being detected?". Runs independently of a session; returns the measured write round-trip.
+   */
+  async flashTest(color: RGB, times = 6, onMs = 90, offMs = 160): Promise<{ writes: number; writeMs: number }> {
+    const music = this.music
+    if (!music) throw new Error('this mouse driver has no music service')
+    const caps = await music.probe()
+    if (!caps.flashLight) throw new Error('this mouse has no light bar to flash')
+    await music.snapshot()
+    this.restoreNeeded = true
+    await music.enterLightSession()
+    let writes = 0
+    let worst = 0
+    const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+    for (let i = 0; i < times; i++) {
+      for (const lit of [true, false]) {
+        const started = nowMs()
+        await music.setLightEffect(strobeFrame(color, lit))
+        worst = Math.max(worst, Math.round(nowMs() - started))
+        writes++
+        this.memoryWrites++
+        await wait(lit ? onMs : offMs)
+      }
+    }
+    this.writeMs = worst
+    return { writes, writeMs: worst }
   }
 
   status(): Omit<SinkStatus, 'enabled'> {

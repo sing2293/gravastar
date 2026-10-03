@@ -44,6 +44,9 @@ class StubMusic implements MouseMusicService {
   async snapshot(): Promise<void> {
     this.calls.push('snapshot')
   }
+  async enterLightSession(): Promise<void> {
+    this.calls.push('enterLightSession')
+  }
   async restore(): Promise<void> {
     this.calls.push('restore')
   }
@@ -465,22 +468,59 @@ describe('MouseSink pulse mode (firmware breathing)', () => {
 })
 
 describe('MouseSink strobe mode', () => {
-  it('punches on the beat and decays between beats', async () => {
+  it('blinks once per beat: lit on the onset, dark again after strobeOnMs', async () => {
     const music = new StubMusic({ flashLight: true })
-    const sink = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'strobe', strobeFps: 20, strobeDecayMs: 140 })
+    const sink = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'strobe', strobeFps: 50, strobeOnMs: 90 })
     await sink.prepare()
-    sink.push(frame(0, { beat: true, beatStrength: 1 }, { intensity: 0 }))
+    expect(music.calls).toContain('enterLightSession') // the light must not blank itself while the mouse moves
+
+    // Quiet frames before any beat write nothing at all.
+    await sweep(sink, 0, 200, 20, { beat: false })
+    expect(music.effects).toHaveLength(0)
+
+    sink.push(frame(300, { beat: true, beatStrength: 1 }, { intensity: 0 }))
     await flush()
-    expect(music.effects[0]).toMatchObject({ mode: 3, brightness: 9, color: ACCENT })
-    for (const t of [100, 200, 300]) {
-      sink.push(frame(t, {}, { intensity: 0 }))
-      await flush()
-    }
-    const levels = music.effects.map((e) => e.brightness)
-    expect(levels[0]).toBe(9)
-    for (let i = 1; i < levels.length; i++) expect(levels[i]!).toBeLessThan(levels[i - 1]!)
-    expect(sink.status().mode).toBe('strobe (beat writes)')
-    expect(sink.status().memoryWrites).toBe(music.effects.length)
+    expect(music.effects[0]).toEqual({ mode: 3, color: ACCENT, speed: 0, brightness: 9 })
+
+    // Still lit inside the flash window, dark once it has passed — and then nothing until the next beat.
+    sink.push(frame(350, {}, { intensity: 0 }))
+    await flush()
+    expect(music.effects).toHaveLength(1)
+    sink.push(frame(420, {}, { intensity: 0 }))
+    await flush()
+    expect(music.effects[1]).toMatchObject({ mode: 3, brightness: 0 })
+    await sweep(sink, 460, 900, 20)
+    expect(music.effects).toHaveLength(2)
+
+    sink.push(frame(1000, { beat: true, beatStrength: 1 }))
+    await flush()
+    expect(music.effects).toHaveLength(3)
+    expect(music.effects[2]!.brightness).toBe(9)
+    expect(sink.status()).toMatchObject({ mode: 'strobe (beat writes)', memoryWrites: 3 })
+  })
+
+  it('ignores a weak onset and reports the measured write round-trip', async () => {
+    const music = new StubMusic({ flashLight: true })
+    const sink = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'strobe', strobeBeatThreshold: 0.5 })
+    await sink.prepare()
+    sink.push(frame(0, { beat: true, beatStrength: 0.2 }))
+    await flush()
+    expect(music.effects).toHaveLength(0)
+    sink.push(frame(500, { beat: true, beatStrength: 0.9 }))
+    await flush()
+    expect(music.effects).toHaveLength(1)
+    expect(sink.writeLatencyMs).toBeGreaterThanOrEqual(0)
+  })
+
+  it('flashTest blinks without any audio so the path can be checked on its own', async () => {
+    const music = new StubMusic({ flashLight: true })
+    const sink = new MouseSink('m', 'Mouse', driverWith(music))
+    const result = await sink.flashTest({ r: 255, g: 0, b: 0 }, 3, 1, 1)
+    expect(result.writes).toBe(6) // three blinks: lit + dark
+    expect(music.effects.map((e) => e.brightness)).toEqual([9, 0, 9, 0, 9, 0])
+    expect(music.calls.slice(0, 3)).toEqual(['probe', 'snapshot', 'enterLightSession'])
+    await sink.release()
+    expect(music.calls).toContain('restore') // the test owns the snapshot, so it is put back
   })
 
   it('is never chosen automatically and stops at the write budget', async () => {

@@ -92,12 +92,17 @@ is JSON of these types; vendor profile files are converted at the edge.
   *breathing* mode (light mode 2) at the speed `audio/tempo.ts` derives from the detected BPM, so the mouse keeps
   pulsing with no further traffic and is only rewritten when the colour or tempo actually changes (coarse 3/6/9
   brightness steps with hysteresis keep loudness wobble from flapping it — a three-minute track costs tens of
-  writes, not thousands); (3) **strobe** — opt-in, host-driven flash several times per beat, the most reactive and
-  by far the most wear; (4) **gentle** — a colour change on strong beats only. A per-session write budget pauses
+  writes, not thousands); (3) **strobe** — opt-in, entirely host-driven: a beat writes the block lit, `strobeOnMs`
+  later a second write puts it out, so the mouse blinks once per beat (two memory writes per beat — the most
+  reactive and by far the most wear); (4) **gentle** — a colour change on strong beats only. A per-session write budget pauses
   the mouse and the UI says so. The receiver's RGB bar (`0x18`) costs no memory, so when the receiver has one it is
   driven *alongside* the body light, and a receiver that stops answering is dropped without taking the mouse down.
   Whether GravaStar mice accept `0xB2/0xB6` is UNVERIFIED; the probe is harmless (a zero frame) and the UI reports
-  which path is active.
+  which path is active. Before any body-light strategy runs, `enterLightSession` switches the light on and clears
+  the firmware's **"light off while moving"** byte (`0xB3`) — left set, it blanks the light exactly while a hand is
+  on the mouse, which makes any animation look dead; `restore` puts both back. Changing the path mid-session calls
+  `MusicSyncEngine.refreshSink`, and the panel's **flash test** blinks the mouse with no audio at all, separating
+  "the light does not follow live writes" from "the beat is not being detected" and measuring the write round-trip.
 
 ### `sim/`
 `SimK98Pro` and `SimCompxMouse` implement the transport interface with in-memory state and reply like the real

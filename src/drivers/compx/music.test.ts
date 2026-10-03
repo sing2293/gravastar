@@ -4,7 +4,7 @@ import { WebHidTransport } from '@/hid/core/transport'
 import { createSimCompxMouse } from '@/sim/compx/device'
 import { CompxMouseDriver } from './driver'
 import { Addr } from './eeprom'
-import { sumsTo55 } from './frame'
+import { complementPair, sumsTo55 } from './frame'
 import { CompxLink } from './link'
 import { decodeDongleBar, encodeDongleBar, encodeMusicParams, packAmplitudes, unpackAmplitudes } from './music'
 
@@ -39,6 +39,42 @@ describe('music codecs', () => {
     expect(encodeDongleBar(BAR)).toEqual([3, 1, 2, 3, 4, 6, 7, 0, 0, 0])
     expect(decodeDongleBar(encodeDongleBar(BAR))).toEqual(BAR)
     expect(encodeMusicParams({ ...PARAMS, mode: 300, speed: -4 }).slice(0, 2)).toEqual([255, 0])
+  })
+})
+
+describe('CompxMusic.enterLightSession', () => {
+  it('turns the light on, stops the firmware blanking it while the mouse moves, and puts both back', async () => {
+    const sim = createSimCompxMouse({ link: 'dongle' })
+    const driver = await sim.openDriver()
+    const fw = sim.firmware.flash
+    // Vendor default on most models: light off, and blanked whenever the mouse moves.
+    fw.set(complementPair(1), Addr.MovingOffLight)
+    fw.set(complementPair(0), Addr.LightState)
+    await driver.hid.readRange(Addr.Light, Addr.MovingOffLight + 2) // refresh the host shadow
+    expect((await driver.lighting.get()).offWhileMoving).toBe(true)
+
+    await driver.music.enterLightSession()
+    expect(fw[Addr.MovingOffLight]).toBe(0) // a hand on the mouse no longer blanks the light
+    expect(fw[Addr.LightState]).toBe(1)
+    expect(driver.music.flashWrites).toBe(2)
+
+    await driver.music.setLightEffect({ mode: 3, color: { r: 255, g: 255, b: 255 }, speed: 0, brightness: 9 })
+    await driver.music.restore()
+    expect(fw[Addr.MovingOffLight]).toBe(1)
+    expect(fw[Addr.LightState]).toBe(0)
+    await driver.disconnect()
+  })
+
+  it('writes nothing when the light is already on and stays on while moving', async () => {
+    const sim = createSimCompxMouse({ link: 'dongle' })
+    const driver = await sim.openDriver()
+    const fw = sim.firmware.flash
+    fw.set(complementPair(0), Addr.MovingOffLight)
+    fw.set(complementPair(1), Addr.LightState)
+    await driver.hid.readRange(Addr.Light, Addr.MovingOffLight + 2)
+    await driver.music.enterLightSession()
+    expect(driver.music.flashWrites).toBe(0)
+    await driver.disconnect()
   })
 })
 
