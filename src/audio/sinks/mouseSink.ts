@@ -11,15 +11,24 @@
  *                   status 1, which is how `probe()` finds out.
  *   2. receiver   — 0x18 SetDongleRGBBarMode `[mode, r, g, b, speed, brightness, time]`, answered by 0x19
  *                   (status 1 ⇒ no bar). A command, not a memory write: safe at a few updates per second.
- *   3. gentle     — the light bar itself, only on strong beats, ≥ `gentleMinIntervalMs` apart, and capped by
- *                   `writeBudget` per session.
+ *   3. pulse      — the mouse's own light bar in **firmware breathing mode** (light block mode 2). The firmware
+ *                   animates the fade, so the mouse keeps pulsing with no further writes; the host only rewrites
+ *                   the block when the colour or the tempo-derived speed actually changes. Visibly beat-driven at
+ *                   a fraction of the memory writes of host-driven animation. Default for the body light.
+ *   4. strobe     — host-driven flash: fixed-colour mode rewritten several times per second so each beat punches
+ *                   and decays. The most reactive and by far the most memory writes — opt-in, budgeted.
+ *   5. gentle     — colour change on strong beats only, ≥ `gentleMinIntervalMs` apart; the least wear.
+ *
+ * The receiver's RGB bar is a command path with no memory cost, so when the receiver has one it is driven
+ * **alongside** the body light rather than instead of it (`dongle` as a primary means "bar only").
  */
 import type { RGB } from '@/model/device'
-import type { DongleBar, MouseDriver, MouseMusicCapabilities, MouseMusicService } from '@/model/mouse'
+import type { DongleBar, MouseDriver, MouseLightEffect, MouseMusicCapabilities, MouseMusicService } from '@/model/mouse'
+import { TempoTracker, breathingSpeed, type Tempo } from '../tempo'
 import type { LightingSink, MusicFrame, SinkStatus } from '../types'
 
-export type MouseSinkStrategy = 'amplitude' | 'dongle' | 'gentle'
-export type MouseSinkMode = 'none' | 'amplitude' | 'receiver bar' | 'gentle (memory-safe)'
+export type MouseSinkStrategy = 'amplitude' | 'pulse' | 'strobe' | 'dongle' | 'gentle'
+export type MouseSinkMode = 'none' | 'amplitude' | 'pulse (firmware breathing)' | 'strobe (beat writes)' | 'receiver bar' | 'gentle (memory-safe)'
 
 export interface MouseSinkOptions {
   /** Amplitude-stream (0xB6) writes per second, upper bound; fire-and-forget commands, no memory wear. */
@@ -30,7 +39,17 @@ export interface MouseSinkOptions {
   gentleMinIntervalMs: number
   /** Gentle mode: beats weaker than this (0..1) are ignored. */
   gentleBeatThreshold: number
-  /** Gentle mode: flash writes allowed per session; the sink pauses itself once reached. */
+  /** Pulse mode: shortest gap between two light-block rewrites. */
+  pulseMinIntervalMs: number
+  /** Pulse mode: how far the colour must move (0..255 per channel, Euclidean) before it is worth a write. */
+  pulseColorThreshold: number
+  /** Pulse mode: nudge for the tempo → firmware speed mapping (−9..9), for tuning against the real device. */
+  pulseSpeedOffset: number
+  /** Strobe mode: maximum writes per second. */
+  strobeFps: number
+  /** Strobe mode: time constant of the flash decay after a beat, ms. */
+  strobeDecayMs: number
+  /** Memory writes allowed per session; the sink pauses itself once reached. */
   writeBudget: number
   /** Strategy to try first; `auto` = amplitude → receiver bar → gentle. An unavailable choice falls back to `auto`. */
   prefer?: 'auto' | MouseSinkStrategy
@@ -43,7 +62,12 @@ export const DEFAULT_MOUSE_SINK_OPTIONS: MouseSinkOptions = {
   dongleFps: 4,
   gentleMinIntervalMs: 1500,
   gentleBeatThreshold: 0.45,
-  writeBudget: 400,
+  pulseMinIntervalMs: 700,
+  pulseColorThreshold: 60,
+  pulseSpeedOffset: 0,
+  strobeFps: 8,
+  strobeDecayMs: 140,
+  writeBudget: 2000,
   prefer: 'auto',
   accent: { r: 155, g: 255, b: 49 },
 }
@@ -63,11 +87,14 @@ export const BUDGET_NOTE = 'write budget reached — mouse paused to protect its
 
 const MODE_LABEL: Record<MouseSinkStrategy, MouseSinkMode> = {
   amplitude: 'amplitude',
+  pulse: 'pulse (firmware breathing)',
+  strobe: 'strobe (beat writes)',
   dongle: 'receiver bar',
   gentle: 'gentle (memory-safe)',
 }
-const AUTO_ORDER: MouseSinkStrategy[] = ['amplitude', 'dongle', 'gentle']
-/** Light mode 3 = fixed colour (`LIGHT_MODES`, 02-features.md light block). */
+const AUTO_ORDER: MouseSinkStrategy[] = ['amplitude', 'pulse', 'dongle', 'gentle']
+/** Light modes (`LIGHT_MODES`, 02-features.md §7.2): 2 breathes in firmware, 3 is a steady colour. */
+const BREATHING_LIGHT_MODE = 2
 const FIXED_COLOR_MODE = 3
 /** Vendor `defaultDongleRGBBar` (01-transport-commands.md §6.4): mode 0, red, speed 3, brightness 3, time 1. */
 const DONGLE_BAR_DEFAULTS = { speed: 3, time: 1 }
@@ -104,6 +131,29 @@ export function bandsToLevels(
 }
 
 /** Accent scaled by intensity with a floor, so the bar never reads as "off". */
+/** 0..1 loudness → the light block's 0..9 brightness byte, never fully off while a session runs. */
+export function brightnessFor(intensity: number): number {
+  return Math.max(1, Math.round(Math.max(0, Math.min(1, intensity)) * LIGHT_BRIGHTNESS_MAX))
+}
+
+const PULSE_STEPS = [3, 6, 9]
+/** Loudness needed to climb to the next step, and to fall back from it — the gap is the dead band. */
+const PULSE_UP = [0.34, 0.67]
+const PULSE_DOWN = [0.26, 0.59]
+
+/**
+ * Pulse brightness in three coarse steps (3 / 6 / 9) with hysteresis. The firmware's fade already carries the
+ * movement, so only a real change in loudness is worth an erase cycle — and a level hovering on a boundary must
+ * not flap the light block back and forth. `previous` is the step currently on the device.
+ */
+export function pulseBrightness(intensity: number, previous?: number): number {
+  const v = Math.max(0, Math.min(1, intensity))
+  let i = previous === undefined ? 0 : Math.max(0, PULSE_STEPS.indexOf(previous))
+  while (i < PULSE_STEPS.length - 1 && v >= PULSE_UP[i]!) i++
+  while (i > 0 && v < PULSE_DOWN[i - 1]!) i--
+  return PULSE_STEPS[i]!
+}
+
 export function barColor(accent: RGB, intensity: number, floor = BAR_COLOR_FLOOR): RGB {
   const k = Math.max(floor, Math.min(1, intensity))
   return { r: Math.round(accent.r * k), g: Math.round(accent.g * k), b: Math.round(accent.b * k) }
@@ -116,11 +166,41 @@ export function strategyOrder(
 ): MouseSinkStrategy[] {
   const available: Record<MouseSinkStrategy, boolean> = {
     amplitude: caps.amplitudeStream,
+    pulse: caps.flashLight,
+    strobe: caps.flashLight,
     dongle: caps.dongleBar,
     gentle: caps.flashLight,
   }
   const order = prefer && prefer !== 'auto' ? [prefer, ...AUTO_ORDER.filter((s) => s !== prefer)] : AUTO_ORDER
   return order.filter((s) => available[s])
+}
+
+const scaleRgb = (c: RGB, k: number): RGB => ({
+  r: Math.round(c.r * k),
+  g: Math.round(c.g * k),
+  b: Math.round(c.b * k),
+})
+
+const rgbDistance = (a: RGB, b: RGB): number => Math.hypot(a.r - b.r, a.g - b.g, a.b - b.b)
+
+/** Whether a new look is different enough from the one the firmware is already running to be worth a write. */
+export function effectChanged(next: MouseLightEffect, last: MouseLightEffect | undefined, colorThreshold: number): boolean {
+  if (!last) return true
+  return (
+    next.mode !== last.mode ||
+    next.speed !== last.speed ||
+    next.brightness !== last.brightness ||
+    rgbDistance(next.color, last.color) >= colorThreshold
+  )
+}
+
+/**
+ * Host-driven flash envelope: a beat snaps it to the onset strength, then it decays exponentially so the light
+ * punches and fades between beats. `intensity` keeps a quiet passage dim rather than dark.
+ */
+export function strobeLevel(peak: number, sinceBeatMs: number, decayMs: number, intensity: number): number {
+  const decayed = peak * Math.exp(-Math.max(0, sinceBeatMs) / Math.max(1, decayMs))
+  return Math.max(0, Math.min(1, Math.max(decayed, intensity * 0.35)))
 }
 
 export class MouseSink implements LightingSink {
@@ -140,6 +220,17 @@ export class MouseSink implements LightingSink {
   private note: string | undefined
   private error: string | undefined
   private dongleBase: Pick<DongleBar, 'mode' | 'speed' | 'time'> = { mode: FIXED_COLOR_MODE, ...DONGLE_BAR_DEFAULTS }
+  /** Settings-memory writes this session (what the budget counts); bar and amplitude frames are free. */
+  private memoryWrites = 0
+  private lastEffect: MouseLightEffect | undefined
+  private readonly tempo = new TempoTracker()
+  private lastBeatAt = -Infinity
+  private beatPeak = 0
+  /** The receiver bar, driven alongside a body-light strategy. */
+  private bar = false
+  private barInFlight = false
+  private lastBarSend = -Infinity
+  private barWrites = 0
 
   constructor(
     readonly id: string,
@@ -161,6 +252,15 @@ export class MouseSink implements LightingSink {
     this.windowCount = 0
     this.lastSend = -Infinity
     this.inFlight = false
+    this.memoryWrites = 0
+    this.lastEffect = undefined
+    this.tempo.reset()
+    this.lastBeatAt = -Infinity
+    this.beatPeak = 0
+    this.bar = false
+    this.barInFlight = false
+    this.lastBarSend = -Infinity
+    this.barWrites = 0
     if (!this.music) {
       this.setMode(undefined, 'this mouse driver has no music service')
       return
@@ -198,7 +298,9 @@ export class MouseSink implements LightingSink {
           continue
         }
       }
-      if (strategy === 'dongle') this.dongleBase = await this.readDongleBase()
+      // The receiver bar costs no memory, so drive it as well as the body light whenever the receiver has one.
+      this.bar = caps.dongleBar
+      if (this.bar) this.dongleBase = await this.readDongleBase()
       this.setMode(strategy, this.note)
       return
     }
@@ -223,33 +325,71 @@ export class MouseSink implements LightingSink {
   }
 
   push(frame: MusicFrame): void {
-    if (!this.active || this.inFlight || !this.music || !this.strategy) return
+    if (!this.active || !this.music || !this.strategy) return
     const now = frame.audio.time
+    if (frame.audio.beat) {
+      this.tempo.beat(now)
+      this.lastBeatAt = now
+      this.beatPeak = Math.max(0.35, Math.min(1, frame.audio.beatStrength || frame.intensity))
+    }
+    if (this.strategy !== 'dongle') this.pushBar(frame, now)
+    if (this.inFlight) return
     let write: Promise<void>
+    let memory = false
     switch (this.strategy) {
       case 'amplitude': {
         if (now - this.lastSend < 1000 / this.options.maxFps) return
         write = this.music.sendAmplitudes(bandsToLevels(frame.audio.bands, frame.sensitivity))
         break
       }
+      case 'pulse': {
+        // The firmware runs the fade; a write is only needed when the look itself should change.
+        if (now - this.lastSend < this.options.pulseMinIntervalMs) return
+        const next: MouseLightEffect = {
+          mode: BREATHING_LIGHT_MODE,
+          color: frame.accent,
+          speed: breathingSpeed(this.tempo.tempo.bpm, this.options.pulseSpeedOffset),
+          brightness: pulseBrightness(frame.intensity, this.lastEffect?.brightness),
+        }
+        if (!effectChanged(next, this.lastEffect, this.options.pulseColorThreshold)) return
+        if (this.budgetReached()) return
+        this.lastEffect = next
+        write = this.music.setLightEffect(next)
+        memory = true
+        break
+      }
+      case 'strobe': {
+        if (now - this.lastSend < 1000 / this.options.strobeFps) return
+        const level = strobeLevel(this.beatPeak, now - this.lastBeatAt, this.options.strobeDecayMs, frame.intensity)
+        const next: MouseLightEffect = {
+          mode: FIXED_COLOR_MODE,
+          color: scaleRgb(frame.accent, Math.max(0.15, level)),
+          speed: 0,
+          brightness: Math.max(1, Math.round(level * LIGHT_BRIGHTNESS_MAX)),
+        }
+        // Quantised to the byte the device stores: an unchanged frame is not worth an erase cycle.
+        if (!effectChanged(next, this.lastEffect, 12)) return
+        if (this.budgetReached()) return
+        this.lastEffect = next
+        write = this.music.setLightEffect(next)
+        memory = true
+        break
+      }
       case 'dongle': {
         if (now - this.lastSend < 1000 / this.options.dongleFps) return
-        const brightness = Math.max(1, Math.round(Math.max(0, Math.min(1, frame.intensity)) * LIGHT_BRIGHTNESS_MAX))
         write = this.music.setDongleBar({
           ...this.dongleBase,
           color: barColor(frame.accent, frame.intensity),
-          brightness,
+          brightness: brightnessFor(frame.intensity),
         })
         break
       }
       case 'gentle': {
         if (!frame.audio.beat || frame.audio.beatStrength < this.options.gentleBeatThreshold) return
-        if (this.writes >= this.options.writeBudget) {
-          this.note = BUDGET_NOTE
-          return
-        }
+        if (this.budgetReached()) return
         if (now - this.lastSend < this.options.gentleMinIntervalMs) return
         write = this.music.setLightColor(frame.accent, LIGHT_BRIGHTNESS_MAX)
+        memory = true
         break
       }
     }
@@ -266,8 +406,41 @@ export class MouseSink implements LightingSink {
         // Counted whether or not the device acknowledged: a rejected flash write may still have cost an erase cycle.
         this.inFlight = false
         this.countWrite(now)
-        if (this.strategy === 'gentle' && this.writes >= this.options.writeBudget) this.note = BUDGET_NOTE
+        if (memory) {
+          this.memoryWrites++
+          if (this.memoryWrites >= this.options.writeBudget) this.note = BUDGET_NOTE
+        }
       })
+  }
+
+  /** The receiver's RGB bar: a command, so it is paced by time only and never touches the budget. */
+  private pushBar(frame: MusicFrame, now: number): void {
+    if (!this.bar || this.barInFlight || !this.music) return
+    if (now - this.lastBarSend < 1000 / this.options.dongleFps) return
+    this.lastBarSend = now
+    this.barInFlight = true
+    this.music
+      .setDongleBar({
+        ...this.dongleBase,
+        color: barColor(frame.accent, frame.intensity),
+        brightness: brightnessFor(frame.intensity),
+      })
+      .then(() => {
+        this.barWrites++
+      })
+      .catch(() => {
+        // A receiver that stops answering must not take the body light down with it.
+        this.bar = false
+      })
+      .finally(() => {
+        this.barInFlight = false
+      })
+  }
+
+  private budgetReached(): boolean {
+    if (this.memoryWrites < this.options.writeBudget) return false
+    this.note = BUDGET_NOTE
+    return true
   }
 
   async release(): Promise<void> {
@@ -286,6 +459,16 @@ export class MouseSink implements LightingSink {
     this.note = undefined
   }
 
+  /** Tempo the pulse speed is derived from (undefined until the beat detector has settled). */
+  get tempoEstimate(): Tempo {
+    return this.tempo.tempo
+  }
+
+  /** Settings-memory writes this session — what the write budget counts. */
+  get memoryWriteCount(): number {
+    return this.memoryWrites
+  }
+
   status(): Omit<SinkStatus, 'enabled'> {
     return {
       id: this.id,
@@ -294,6 +477,7 @@ export class MouseSink implements LightingSink {
       active: this.active,
       fps: this.fps,
       writes: this.writes,
+      memoryWrites: this.memoryWrites,
       mode: this.mode,
       note: this.note,
       error: this.error,

@@ -56,6 +56,8 @@ export interface SinkStatus {
   fps: number
   /** Total writes this session (matters for memory-backed devices). */
   writes: number
+  /** Of those, writes that landed in the device's settings memory (the mouse light block). */
+  memoryWrites?: number
   /** How the sink drives the device, e.g. "per-key streaming", "receiver bar", "gentle (memory-safe)". */
   mode?: string
   note?: string

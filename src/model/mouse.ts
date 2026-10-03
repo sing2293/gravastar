@@ -226,6 +226,16 @@ export interface DongleBar {
   time: number
 }
 
+/** One light-block write: the firmware animates `mode` itself (2 = breathing, 3 = fixed colour). */
+export interface MouseLightEffect {
+  mode: number
+  color: RGB
+  /** 0..9; only animated modes use it. */
+  speed: number
+  /** 0..9 */
+  brightness: number
+}
+
 export interface MouseMusicService {
   probe(): Promise<MouseMusicCapabilities>
   /** Remember lighting / receiver state so `restore` can put it back. */
@@ -237,7 +247,12 @@ export interface MouseMusicService {
   sendAmplitudes(levels: ArrayLike<number>): Promise<void>
   /** 0x18: receiver RGB bar. */
   setDongleBar(bar: DongleBar): Promise<void>
-  /** Light-bar block write in settings memory. Callers MUST rate-limit and budget writes. */
+  /**
+   * Light-bar block write in settings memory (mode included, so the firmware's own breathing can be used instead of
+   * driving every frame from the host). Callers MUST rate-limit and budget these writes.
+   */
+  setLightEffect(effect: MouseLightEffect): Promise<void>
+  /** `setLightEffect` with the stored speed and the fixed-colour mode. */
   setLightColor(color: RGB, brightness: number): Promise<void>
 }
 

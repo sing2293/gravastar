@@ -6,7 +6,7 @@ import { useMusicStatus } from './useMusicSync'
 
 /** Why a mouse reacts differently from a keyboard; shown on every mouse row and on the mouse's Music tab. */
 export const MOUSE_MEMORY_NOTE =
-  'The light bar is memory-backed — every colour change is a settings write — so the mouse follows the beat gently unless its firmware supports live amplitudes (probed when the session starts).'
+  'The mouse has no real-time colour command: its light bar lives in settings memory. Pulse mode therefore hands the beat to the firmware — it breathes at the detected tempo and is only rewritten when the colour or tempo changes — so the mouse keeps moving for a handful of memory writes a minute.'
 
 /** Human label for what a sink is doing right now. */
 export function modeLabel(sink: SinkStatus, running: boolean): string {
@@ -50,8 +50,9 @@ export function DevicesCard({ focusId, only }: { focusId?: string; only?: boolea
 
 export function SinkRow({ sink, focus, running }: { sink: SinkStatus; focus: boolean; running: boolean }) {
   const impl = musicEngine.getSink(sink.id)
-  // Only gentle mode spends settings-memory writes; the budget is what the sink pauses at.
-  const budget = impl instanceof MouseSink && sink.mode === 'gentle (memory-safe)' ? impl.options.writeBudget : undefined
+  // Settings-memory writes are the ones that wear the mouse out; the budget is what the sink pauses at.
+  const budget = impl instanceof MouseSink && sink.memoryWrites !== undefined ? impl.options.writeBudget : undefined
+  const tempo = impl instanceof MouseSink ? impl.tempoEstimate : undefined
   return (
     <div className={['sink-row', focus ? 'focus' : ''].join(' ')}>
       <Toggle checked={sink.enabled} onChange={(v) => musicEngine.setEnabled(sink.id, v)} />
@@ -66,10 +67,14 @@ export function SinkRow({ sink, focus, running }: { sink: SinkStatus; focus: boo
       </div>
       <div className="stats">
         <span title="Device writes per second">{sink.fps} fps</span>
-        <span title="Writes this session">
-          {sink.writes}
-          {budget !== undefined ? ` / ${budget}` : ''} writes
-        </span>
+        {budget !== undefined ? (
+          <span title="Settings-memory writes this session, and the budget the sink pauses at">
+            {sink.memoryWrites} / {budget} memory writes
+          </span>
+        ) : (
+          <span title="Writes this session">{sink.writes} writes</span>
+        )}
+        {running && tempo?.bpm !== undefined && <span title="Detected tempo driving the pulse">{tempo.bpm} BPM</span>}
       </div>
       {sink.kind === 'mouse' && <div className="detail">{MOUSE_MEMORY_NOTE}</div>}
       {sink.note && (

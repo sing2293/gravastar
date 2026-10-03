@@ -3,6 +3,7 @@ import type { RGB } from '@/model/device'
 import type {
   DongleBar,
   MouseDriver,
+  MouseLightEffect,
   MouseMusicCapabilities,
   MouseMusicService,
   MusicAmplitudeParams,
@@ -14,6 +15,7 @@ import {
   MouseSink,
   bandsToLevels,
   barColor,
+  pulseBrightness,
   strategyOrder,
   type MouseMusicSnapshotReader,
 } from './mouseSink'
@@ -28,6 +30,7 @@ class StubMusic implements MouseMusicService {
   readonly amplitudes: number[][] = []
   readonly bars: DongleBar[] = []
   readonly lights: { color: RGB; brightness: number }[] = []
+  readonly effects: MouseLightEffect[] = []
   amplitudeParams: MusicAmplitudeParams | undefined
   private readonly pending: (() => void)[] = []
 
@@ -57,6 +60,11 @@ class StubMusic implements MouseMusicService {
   setDongleBar(bar: DongleBar): Promise<void> {
     this.calls.push('setDongleBar')
     this.bars.push(bar)
+    return this.write()
+  }
+  setLightEffect(effect: MouseLightEffect): Promise<void> {
+    this.calls.push('setLightEffect')
+    this.effects.push(effect)
     return this.write()
   }
   setLightColor(color: RGB, brightness: number): Promise<void> {
@@ -150,14 +158,19 @@ describe('MouseSink strategy selection', () => {
     expect(music.amplitudeParams?.forward).toEqual({ r: 1, g: 2, b: 3 })
   })
 
-  it('falls back to the receiver bar, then to gentle mode, then to none', async () => {
-    const bar = new MouseSink('m', 'Mouse', driverWith(new StubMusic({ dongleBar: true, flashLight: true })))
-    await bar.prepare()
-    expect(bar.status().mode).toBe('receiver bar')
+  it('falls back to the mouse pulse, then the receiver bar, then to none', async () => {
+    // A mouse with its own light pulses; the bar is driven alongside it, not instead of it.
+    const both = new MouseSink('m', 'Mouse', driverWith(new StubMusic({ dongleBar: true, flashLight: true })))
+    await both.prepare()
+    expect(both.status().mode).toBe('pulse (firmware breathing)')
 
-    const gentle = new MouseSink('m', 'Mouse', driverWith(new StubMusic({ flashLight: true })))
-    await gentle.prepare()
-    expect(gentle.status().mode).toBe('gentle (memory-safe)')
+    const pulse = new MouseSink('m', 'Mouse', driverWith(new StubMusic({ flashLight: true })))
+    await pulse.prepare()
+    expect(pulse.status().mode).toBe('pulse (firmware breathing)')
+
+    const barOnly = new MouseSink('m', 'Mouse', driverWith(new StubMusic({ dongleBar: true })))
+    await barOnly.prepare()
+    expect(barOnly.status().mode).toBe('receiver bar')
 
     const none = new StubMusic()
     const nothing = new MouseSink('m', 'Mouse', driverWith(none))
@@ -186,7 +199,7 @@ describe('MouseSink strategy selection', () => {
       { prefer: 'amplitude' },
     )
     await wantAmplitude.prepare()
-    expect(wantAmplitude.status().mode).toBe('receiver bar')
+    expect(wantAmplitude.status().mode).toBe('pulse (firmware breathing)')
     expect(wantAmplitude.status().note).toMatch(/amplitude/)
   })
 
@@ -202,8 +215,9 @@ describe('MouseSink strategy selection', () => {
 
   it('strategyOrder keeps only probed capabilities, preferred first', () => {
     const all = { amplitudeStream: true, dongleBar: true, flashLight: true }
-    expect(strategyOrder(all)).toEqual(['amplitude', 'dongle', 'gentle'])
-    expect(strategyOrder(all, 'gentle')).toEqual(['gentle', 'amplitude', 'dongle'])
+    expect(strategyOrder(all)).toEqual(['amplitude', 'pulse', 'dongle', 'gentle'])
+    expect(strategyOrder(all, 'gentle')).toEqual(['gentle', 'amplitude', 'pulse', 'dongle'])
+    expect(strategyOrder(all, 'strobe')).toEqual(['strobe', 'amplitude', 'pulse', 'dongle', 'gentle']) // never automatic
     expect(strategyOrder({ amplitudeStream: false, dongleBar: true, flashLight: false }, 'amplitude')).toEqual([
       'dongle',
     ])
@@ -352,22 +366,172 @@ describe('MouseSink receiver-bar mode', () => {
     music.fail = true
     const fallback = new MouseSink('m', 'Mouse', driverWith(music))
     await fallback.prepare()
-    expect(fallback.status().mode).toBe('receiver bar')
+    expect(fallback.status().mode).toBe('pulse (firmware breathing)') // the bar is still driven alongside it
     fallback.push(frame(0))
     await flush()
     expect(music.bars[1]).toMatchObject({ mode: 3, speed: 3, time: 1 })
 
-    // The bar is only read when the receiver strategy is the one in use.
+    // The bar is read whenever it will be driven — including alongside a body-light strategy.
     const gentle = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'gentle' })
     await gentle.prepare()
-    expect(music.reads).toBe(2)
+    expect(music.reads).toBe(3)
+  })
+})
+
+describe('MouseSink pulse mode (firmware breathing)', () => {
+  const beat = { beat: true, beatStrength: 0.8 }
+
+  it('writes the breathing block only when the look actually changes', async () => {
+    const music = new StubMusic({ flashLight: true })
+    const sink = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'pulse', pulseMinIntervalMs: 100 })
+    await sink.prepare()
+    // Same accent and loudness frame after frame: the firmware keeps breathing, the host stays quiet. The only
+    // rewrites are the one that starts it and the one that applies the speed once the tempo is known.
+    await sweep(sink, 0, 2000, 50, beat)
+    expect(music.effects.length).toBeLessThanOrEqual(2) // 41 frames pushed
+    expect(music.effects[0]).toMatchObject({ mode: 2, color: ACCENT, brightness: 6 })
+    expect(sink.status()).toMatchObject({ mode: 'pulse (firmware breathing)' })
+    expect(sink.status().memoryWrites).toBe(music.effects.length)
+
+    // A different colour is worth a write; a barely different one is not.
+    const before = music.effects.length
+    sink.push(frame(3000, beat, { accent: { r: 0, g: 0, b: 255 } }))
+    await flush()
+    expect(music.effects).toHaveLength(before + 1)
+    sink.push(frame(4000, beat, { accent: { r: 0, g: 10, b: 245 } }))
+    await flush()
+    expect(music.effects).toHaveLength(before + 1)
+  })
+
+  it('derives the firmware speed from the detected tempo', async () => {
+    const music = new StubMusic({ flashLight: true })
+    const sink = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'pulse', pulseMinIntervalMs: 0 })
+    await sink.prepare()
+    expect(sink.tempoEstimate.bpm).toBeUndefined()
+    // 120 BPM: a beat every 500 ms.
+    for (let t = 0; t <= 4000; t += 500) {
+      sink.push(frame(t, beat))
+      await flush()
+    }
+    expect(sink.tempoEstimate.bpm).toBe(120)
+    const last = music.effects[music.effects.length - 1]!
+    expect(last.speed).toBe(7) // 120 BPM → mid of the 0..9 range
+    expect(last.mode).toBe(2)
+
+    const fast = new MouseSink('m', 'Mouse', driverWith(new StubMusic({ flashLight: true })), {
+      prefer: 'pulse',
+      pulseMinIntervalMs: 0,
+      pulseSpeedOffset: 2,
+    })
+    await fast.prepare()
+    for (let t = 0; t <= 4000; t += 500) {
+      fast.push(frame(t, beat))
+      await flush()
+    }
+    expect(fast.tempoEstimate.bpm).toBe(120)
+    expect((fast as unknown as { lastEffect: { speed: number } }).lastEffect.speed).toBe(9) // offset applied
+  })
+
+  it('does not spend a write on every loudness wobble', async () => {
+    expect([0, 0.2, 0.4, 0.6, 0.8, 1].map((v) => pulseBrightness(v))).toEqual([3, 3, 6, 6, 9, 9])
+    expect(pulseBrightness(0.3, 6)).toBe(6) // inside the dead band: stays where it is
+    expect(pulseBrightness(0.2, 6)).toBe(3) // below it: falls back
+    const music = new StubMusic({ flashLight: true })
+    const sink = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'pulse', pulseMinIntervalMs: 0 })
+    await sink.prepare()
+    // One steady colour, loudness breathing around the middle of the range: the firmware keeps the movement.
+    for (let t = 0; t < 30_000; t += 20) {
+      sink.push(frame(t, {}, { intensity: 0.45 + 0.1 * Math.sin(t / 300) }))
+      await Promise.resolve()
+    }
+    await flush()
+    expect(sink.status().memoryWrites).toBeLessThanOrEqual(2)
+  })
+
+  it('keeps writes far below a host-driven animation over a three-minute track', async () => {
+    const music = new StubMusic({ flashLight: true })
+    const sink = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'pulse' })
+    await sink.prepare()
+    // 60 fps of audio for 180 s, colour drifting slowly through the spectrum as a preset would move it.
+    for (let t = 0; t < 180_000; t += 16) {
+      const hue = (t / 180_000) * 255
+      sink.push(frame(t, t % 500 < 16 ? beat : {}, { accent: { r: Math.round(hue), g: 255 - Math.round(hue), b: 90 } }))
+      await Promise.resolve()
+    }
+    await flush()
+    expect(sink.status().memoryWrites).toBeLessThan(60) // ≈ one write every 3 s
+    expect(sink.status().memoryWrites).toBeGreaterThan(2)
+  })
+})
+
+describe('MouseSink strobe mode', () => {
+  it('punches on the beat and decays between beats', async () => {
+    const music = new StubMusic({ flashLight: true })
+    const sink = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'strobe', strobeFps: 20, strobeDecayMs: 140 })
+    await sink.prepare()
+    sink.push(frame(0, { beat: true, beatStrength: 1 }, { intensity: 0 }))
+    await flush()
+    expect(music.effects[0]).toMatchObject({ mode: 3, brightness: 9, color: ACCENT })
+    for (const t of [100, 200, 300]) {
+      sink.push(frame(t, {}, { intensity: 0 }))
+      await flush()
+    }
+    const levels = music.effects.map((e) => e.brightness)
+    expect(levels[0]).toBe(9)
+    for (let i = 1; i < levels.length; i++) expect(levels[i]!).toBeLessThan(levels[i - 1]!)
+    expect(sink.status().mode).toBe('strobe (beat writes)')
+    expect(sink.status().memoryWrites).toBe(music.effects.length)
+  })
+
+  it('is never chosen automatically and stops at the write budget', async () => {
+    expect(strategyOrder({ amplitudeStream: false, dongleBar: false, flashLight: true })).toEqual(['pulse', 'gentle'])
+    const music = new StubMusic({ flashLight: true })
+    const sink = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'strobe', strobeFps: 100, writeBudget: 5 })
+    await sink.prepare()
+    for (let t = 0; t <= 2000; t += 50) {
+      sink.push(frame(t, { beat: t % 400 === 0, beatStrength: 1 }))
+      await flush()
+    }
+    expect(music.effects).toHaveLength(5)
+    expect(sink.status()).toMatchObject({ memoryWrites: 5, note: BUDGET_NOTE })
+  })
+})
+
+describe('MouseSink receiver bar alongside the mouse light', () => {
+  it('drives the bar and the body light together without spending the memory budget', async () => {
+    const music = new StubMusic({ dongleBar: true, flashLight: true })
+    const sink = new MouseSink('m', 'Mouse', driverWith(music), { dongleFps: 10, pulseMinIntervalMs: 100 })
+    await sink.prepare()
+    expect(sink.status().mode).toBe('pulse (firmware breathing)')
+    await sweep(sink, 0, 1000, 50, { beat: true, beatStrength: 0.8 })
+    expect(music.bars.length).toBeGreaterThan(5) // the bar keeps moving every frame budget allows
+    expect(music.effects.length).toBeLessThanOrEqual(2) // …while the mouse block is barely written
+    expect(sink.status().memoryWrites).toBe(music.effects.length)
+  })
+
+  it('a receiver that stops answering does not take the body light down', async () => {
+    const music = new StubMusic({ dongleBar: true, flashLight: true })
+    const sink = new MouseSink('m', 'Mouse', driverWith(music), { dongleFps: 100, pulseMinIntervalMs: 0 })
+    await sink.prepare()
+    music.rejectWrites = true
+    sink.push(frame(0, { beat: true, beatStrength: 1 }))
+    await flush()
+    music.rejectWrites = false
+    sink.push(frame(500, { beat: true, beatStrength: 1 }, { accent: { r: 0, g: 0, b: 255 } }))
+    await flush()
+    const barsAfter = music.bars.length
+    sink.push(frame(1000, { beat: true, beatStrength: 1 }, { accent: { r: 255, g: 255, b: 0 } }))
+    await flush()
+    expect(music.bars).toHaveLength(barsAfter) // bar disabled after its failure
+    expect(music.effects.length).toBeGreaterThan(1) // body light still being written
+    expect(sink.status().active).toBe(true)
   })
 })
 
 describe('MouseSink gentle mode', () => {
   it('writes the light bar only on strong beats', async () => {
     const music = new StubMusic({ flashLight: true })
-    const sink = new MouseSink('m', 'Mouse', driverWith(music), { gentleBeatThreshold: 0.45 })
+    const sink = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'gentle', gentleBeatThreshold: 0.45 })
     await sink.prepare()
     sink.push(frame(0, { beat: false, beatStrength: 0.9 }))
     await flush()
@@ -381,7 +545,7 @@ describe('MouseSink gentle mode', () => {
 
   it('respects the minimum interval between flash writes', async () => {
     const music = new StubMusic({ flashLight: true })
-    const sink = new MouseSink('m', 'Mouse', driverWith(music), { gentleMinIntervalMs: 1500 })
+    const sink = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'gentle', gentleMinIntervalMs: 1500 })
     await sink.prepare()
     for (const t of [0, 500, 1000, 1499, 1500, 2000, 3000]) {
       sink.push(frame(t, { beat: true, beatStrength: 1 }))
@@ -393,7 +557,7 @@ describe('MouseSink gentle mode', () => {
 
   it('stops at the write budget and says so', async () => {
     const music = new StubMusic({ flashLight: true })
-    const sink = new MouseSink('m', 'Mouse', driverWith(music), { writeBudget: 3, gentleMinIntervalMs: 1000 })
+    const sink = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'gentle', writeBudget: 3, gentleMinIntervalMs: 1000 })
     await sink.prepare()
     expect(sink.status().note).toBeUndefined()
     for (const t of [0, 2000, 4000]) {
@@ -419,7 +583,7 @@ describe('MouseSink over the simulated Compx mouse', () => {
     const driver = await sim.openDriver()
     const lightBlock = () => Array.from(sim.firmware.flash.subarray(0xa0, 0xa9))
     const before = lightBlock()
-    const sink = new MouseSink('m', 'Mercury', driver, { maxFps: 100, dongleFps: 100, gentleMinIntervalMs: 0 })
+    const sink = new MouseSink('m', 'Mercury', driver, { maxFps: 100, dongleFps: 100, gentleMinIntervalMs: 0, pulseMinIntervalMs: 0 })
     await sink.prepare()
     expect(sink.status().active).toBe(true)
     expect(sink.status().mode).not.toBe('none')

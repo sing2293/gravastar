@@ -85,12 +85,19 @@ is JSON of these types; vendor profile files are converted at the edge.
   while the user is in another app. The tab still has to stay open — the keyboard has no microphone and none of its
   stored effects react to sound (the firmware's `musicMain/musicSpectrum/musicSide` flags are unused by the vendor
   tool and have no command behind them), so the PC must feed it colours.
-- Mouse sink — the mouse's light bar is **not** a real-time channel (it is a block in settings memory), so the sink
-  probes at `prepare` and picks the safest capable path: (1) `0xB6` amplitude streaming if the firmware
-  acknowledges it (≤ 10 Hz, no memory writes); (2) the receiver's RGB bar via `0x18` (command-driven, ≤ 4 Hz);
-  (3) **gentle mode** — a colour change only on strong beats, at most one settings write per 1.5 s and a hard
-  per-session write budget, after which the mouse pauses and the UI says so. Whether GravaStar mice accept
-  `0xB2/0xB6` is UNVERIFIED; the probe is harmless (a zero frame) and the UI reports which path is active.
+- Mouse sink — the mouse's light bar is **not** a real-time channel: the only way to change it is a 7-byte block in
+  settings memory (`0xA0`, written with `WriteFlashData`), so host-driven animation means an erase cycle per frame.
+  The sink probes at `prepare` and picks a body-light path: (1) `0xB6` amplitude streaming if the firmware
+  acknowledges it (≤ 10 Hz, no memory writes); (2) **pulse** — the default: the block is set to the firmware's own
+  *breathing* mode (light mode 2) at the speed `audio/tempo.ts` derives from the detected BPM, so the mouse keeps
+  pulsing with no further traffic and is only rewritten when the colour or tempo actually changes (coarse 3/6/9
+  brightness steps with hysteresis keep loudness wobble from flapping it — a three-minute track costs tens of
+  writes, not thousands); (3) **strobe** — opt-in, host-driven flash several times per beat, the most reactive and
+  by far the most wear; (4) **gentle** — a colour change on strong beats only. A per-session write budget pauses
+  the mouse and the UI says so. The receiver's RGB bar (`0x18`) costs no memory, so when the receiver has one it is
+  driven *alongside* the body light, and a receiver that stops answering is dropped without taking the mouse down.
+  Whether GravaStar mice accept `0xB2/0xB6` is UNVERIFIED; the probe is harmless (a zero frame) and the UI reports
+  which path is active.
 
 ### `sim/`
 `SimK98Pro` and `SimCompxMouse` implement the transport interface with in-memory state and reply like the real

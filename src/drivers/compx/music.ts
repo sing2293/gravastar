@@ -16,6 +16,7 @@ import { TimeoutError } from '@/hid/core/request'
 import type { RGB } from '@/model/device'
 import type {
   DongleBar,
+  MouseLightEffect,
   MouseLighting,
   MouseLightingService,
   MouseMusicCapabilities,
@@ -38,9 +39,11 @@ export const enum MusicCommand {
 
 export const AMPLITUDE_COUNT = 20
 export const AMPLITUDE_MAX = 15
-/** Mouse light mode 3 = fixed colour (`LightMode_To_Disable`, UserConvert.js:62-109). */
+/** Mouse light modes (`LIGHT_MODES`, UserConvert.js:62-109): 2 animates in firmware, 3 is a steady colour. */
+export const BREATHING_MODE = 2
 export const FIXED_COLOUR_MODE = 3
 export const LIGHT_BRIGHTNESS_MAX = 9
+export const LIGHT_SPEED_MAX = 9
 
 // ---------------------------------------------------------------------------
 // Codecs (pure)
@@ -300,8 +303,8 @@ export class CompxMusic implements MouseMusicService {
    * One 7-byte block write at 0xA0 (fixed colour, speed kept, brightness 0..9) plus the on/off byte at 0xA7 only
    * when the bar was off — the vendor's order. Each frame is a settings-memory write: pace and budget calls.
    */
-  async setLightColor(color: RGB, brightness: number): Promise<void> {
-    const cur = await this.host.lighting.get()
+  async setLightEffect(effect: MouseLightEffect): Promise<void> {
+    const cur = await this.host.lighting.get() // local flash shadow, no bus traffic
     const hid = this.host.hid
     if (!cur.on) {
       this.flashWrites++
@@ -311,11 +314,16 @@ export class CompxMusic implements MouseMusicService {
     await hid.writeArray(
       Addr.Light,
       encodeLightBlock({
-        mode: FIXED_COLOUR_MODE,
-        color,
-        speed: cur.speed,
-        brightness: clamp(Math.round(brightness) || 0, 0, LIGHT_BRIGHTNESS_MAX),
+        mode: effect.mode,
+        color: effect.color,
+        speed: clamp(Math.round(effect.speed) || 0, 0, LIGHT_SPEED_MAX),
+        brightness: clamp(Math.round(effect.brightness) || 0, 0, LIGHT_BRIGHTNESS_MAX),
       }),
     )
+  }
+
+  async setLightColor(color: RGB, brightness: number): Promise<void> {
+    const cur = await this.host.lighting.get()
+    await this.setLightEffect({ mode: FIXED_COLOUR_MODE, color, speed: cur.speed, brightness })
   }
 }
