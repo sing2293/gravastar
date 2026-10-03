@@ -65,8 +65,14 @@ is JSON of these types; vendor profile files are converted at the edge.
      Chrome ≥ 141 on macOS ≥ 14.2 exposes a "share system audio" option; Windows/ChromeOS have had it longer.
   2. **Browser tab** — same API, user picks the tab playing music (YouTube, Spotify web…).
   3. **Microphone** — `getUserMedia({ audio })`, what the Compx tool's "recorder music" mode uses.
-- `analyzer.ts`: `AnalyserNode` FFT → normalized bands (bass/mid/treble + N columns), RMS energy, and a simple
-  onset/beat detector with adaptive threshold. Runs on `requestAnimationFrame`.
+- `analyzer.ts`: `AnalyserNode` FFT → normalized bands (bass/mid/treble + N columns), RMS energy with a slow AGC,
+  and onset detection by **spectral flux** — the summed per-band rise since the last frame, low-weighted, against a
+  threshold that follows the recent mean plus a few standard deviations, with a decaying peak-relative floor. It
+  needs no absolute loudness, so a quiet stream or a bass-light track produces the same onsets as a loud one (the
+  earlier `bass > 0.08` gate simply never fired on either). `beatSensitivity` is a live knob on the extractor.
+- Engine options also carry `randomColor`: a new golden-angle hue on every beat, used as both the preset colour and
+  the single-light accent, so a mouse changes colour per beat. The status publishes the running beat count and the
+  tempo from `TempoTracker` on each beat, which is how a user confirms onsets are being found at all.
 - `musicSync.ts`: **one engine, many sinks.** The engine owns the audio source and the analysis loop; every
   connected device registers a `LightingSink` (`sinks/keyboardSink.ts`, `sinks/mouseSink.ts`) that receives a
   `MusicFrame` per tick — the audio features plus the preset's per-keyboard rendering inputs and an `accent`

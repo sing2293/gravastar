@@ -32,6 +32,48 @@ describe('FeatureExtractor', () => {
   })
 })
 
+describe('onset detection on difficult material', () => {
+  /** Frames of a track: `attack` frames are a transient, the rest steady. Everything scaled by `gain`. */
+  function play(fx: FeatureExtractor, frames: number, gain: number, attackEvery: number, bassy: boolean): number {
+    let beats = 0
+    const time = new Uint8Array(2048).fill(130)
+    for (let i = 0; i < frames; i++) {
+      const attack = i % attackEvery === 0 && i > 0
+      const shape = (hz: number) => {
+        const base = bassy ? (hz < 150 ? 0.7 : 0.1) : hz > 1200 && hz < 6000 ? 0.5 : 0.08
+        return base * gain * (attack ? 2.6 : 1)
+      }
+      if (fx.extract(spectrum(1024, shape), time, i * 20).beat) beats++
+    }
+    return beats
+  }
+
+  it('finds beats in quiet, bass-light music that a raw bass gate would miss', () => {
+    // 10 % of full scale, energy only in the upper mids — the old `bass > 0.08` gate never fired here.
+    const quiet = new FeatureExtractor(DEFAULT_ANALYZER, 48000, 1024)
+    const beats = play(quiet, 120, 0.1, 10, false)
+    expect(beats).toBeGreaterThanOrEqual(8)
+    expect(beats).toBeLessThanOrEqual(12)
+  })
+
+  it('finds the same beats whether the source is loud or quiet', () => {
+    const loud = play(new FeatureExtractor(DEFAULT_ANALYZER, 48000, 1024), 120, 1, 10, true)
+    const quiet = play(new FeatureExtractor(DEFAULT_ANALYZER, 48000, 1024), 120, 0.12, 10, true)
+    expect(Math.abs(loud - quiet)).toBeLessThanOrEqual(1)
+  })
+
+  it('does not fire on steady sound, and sensitivity trades misses for false positives', () => {
+    const steady = new FeatureExtractor(DEFAULT_ANALYZER, 48000, 1024)
+    expect(play(steady, 120, 0.6, 10_000, true)).toBe(0)
+
+    const shy = new FeatureExtractor(DEFAULT_ANALYZER, 48000, 1024)
+    shy.beatSensitivity = 0.4
+    const eager = new FeatureExtractor(DEFAULT_ANALYZER, 48000, 1024)
+    eager.beatSensitivity = 2.5
+    expect(play(eager, 200, 0.2, 10, false)).toBeGreaterThanOrEqual(play(shy, 200, 0.2, 10, false))
+  })
+})
+
 describe('presets', () => {
   const frame = { time: 0, level: 0.8, bands: Float32Array.from({ length: 24 }, (_, i) => (i < 12 ? 0.9 : 0.1)), bass: 0.9, mid: 0.3, treble: 0.1, beat: true, beatStrength: 0.7 }
   it('render a lighting frame for every key or a single colour', () => {

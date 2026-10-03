@@ -48,6 +48,9 @@ export function LiveCard({ focusId }: { focusId?: string }) {
             <span style={{ width: `${(frame?.level ?? 0) * 100}%` }} />
           </div>
           <span className={['badge', frame?.beat ? 'accent' : ''].join(' ')}>beat</span>
+          <span className="dim" style={{ fontSize: 12, minWidth: 110, textAlign: 'right' }}>
+            {status.beats} beats{status.bpm ? ` · ${status.bpm} BPM` : ''}
+          </span>
         </div>
         {shown.map((s) => (
           <DeviceVisual key={s.id} sink={s} frame={frame} running={status.running} labelled={!focusId} />

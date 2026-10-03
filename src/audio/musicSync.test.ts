@@ -62,6 +62,7 @@ function harness(startAt = 1000) {
   const scheduled: (() => void)[] = []
   const cancelled: number[] = []
   const opened: Opened[] = []
+  const sensitivities: number[] = []
   const engine = new MusicSyncEngine(
     { preset: 'pulse', color: { r: 255, g: 0, b: 0 } },
     {
@@ -73,6 +74,7 @@ function harness(startAt = 1000) {
           close: async () => {
             rec.closed++
           },
+          setBeatSensitivity: (v) => sensitivities.push(v),
         }
         return { source, stop: () => rec.stopped++, onEnded: (cb) => (rec.ended = cb) }
       },
@@ -84,7 +86,7 @@ function harness(startAt = 1000) {
       now: () => now,
     },
   )
-  return { engine, scheduled, cancelled, opened, setNow: (t: number) => (now = t) }
+  return { engine, scheduled, cancelled, opened, sensitivities, setNow: (t: number) => (now = t) }
 }
 
 /** `setEnabled` / `removeSink` fire prepare/release without awaiting them. */
@@ -300,5 +302,51 @@ describe('MusicSyncEngine', () => {
     engine.step(1500)
     expect(a.frames[0]!.preset).toBe('spectrum')
     expect(a.frames[0]!.sensitivity).toBe(1.5)
+  })
+})
+
+describe('MusicSyncEngine colour and beat options', () => {
+  it('gives every beat a new colour when random colour is on, and feeds it to the sinks', async () => {
+    const { engine } = harness()
+    const sink = new FakeSink('m', 'Mouse', 'mouse')
+    engine.addSink(sink)
+    engine.update({ randomColor: true })
+    await engine.start('system')
+    for (let t = 0; t < 6; t++) engine.step(1000 + t * 100) // every scripted frame carries a beat
+    const colours = sink.frames.map((f) => `${f.color.r},${f.color.g},${f.color.b}`)
+    expect(new Set(colours).size).toBe(colours.length) // a different colour each beat
+    // The mouse follows the accent, which must be that same colour rather than the preset's own.
+    for (const f of sink.frames) expect(f.accent).toEqual(f.color)
+    expect(engine.getStatus().beats).toBeGreaterThan(0)
+
+    engine.update({ randomColor: false, color: { r: 1, g: 2, b: 3 } })
+    engine.step(2000)
+    expect(sink.frames[sink.frames.length - 1]!.color).toEqual({ r: 1, g: 2, b: 3 })
+    await engine.stop()
+  })
+
+  it('pushes beat sensitivity to the source at start and when changed', async () => {
+    const { engine, sensitivities } = harness()
+    engine.update({ beatSensitivity: 1.8 })
+    await engine.start('system')
+    expect(sensitivities).toEqual([1.8])
+    engine.update({ beatSensitivity: 0.6 })
+    expect(sensitivities).toEqual([1.8, 0.6])
+    await engine.stop()
+  })
+
+  it('counts beats and reports a tempo, resetting both on the next session', async () => {
+    const { engine } = harness()
+    await engine.start('system')
+    for (let i = 0; i < 12; i++) engine.step(1000 + i * 500) // 120 BPM
+    const status = engine.getStatus()
+    expect(status.beats).toBeGreaterThanOrEqual(11)
+    expect(status.bpm).toBe(120)
+    await engine.stop()
+    await engine.start('system')
+    // `start` runs one frame immediately, so the counter is back at the beginning rather than exactly zero.
+    expect(engine.getStatus().beats).toBeLessThanOrEqual(1)
+    expect(engine.getStatus().bpm).toBeUndefined()
+    await engine.stop()
   })
 })

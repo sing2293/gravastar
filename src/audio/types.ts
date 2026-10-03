@@ -86,6 +86,9 @@ export interface MusicSyncStatus {
   preset: string
   /** Analysis frames per second. */
   fps: number
+  /** Onsets detected this session, and the tempo derived from them. */
+  beats: number
+  bpm?: number
   sinks: SinkStatus[]
   /** `audio`: ticks come from the audio thread and survive the tab going to the background; `frame`: page-driven. */
   clock?: 'audio' | 'frame'

@@ -6,17 +6,38 @@ import type { RGB } from '@/model/device'
 import { AudioAnalyzer, DEFAULT_ANALYZER, type AnalyzerOptions } from './analyzer'
 import { captureAudio, type CapturedAudio } from './capture'
 import type { TickSource } from './clock'
-import { PRESETS, presetById, type MusicPreset } from './presets'
+import { PRESETS, hsv, presetById, type MusicPreset } from './presets'
+import { TempoTracker } from './tempo'
 import type { AudioFrame, AudioSourceKind, LightingSink, MusicFrame, MusicSyncStatus, SinkStatus } from './types'
 
 export interface MusicSyncOptions {
   preset: string
   color: RGB
   sensitivity: number
+  /** How readily onsets are reported; >1 finds more beats (quiet or bass-light material needs it). */
+  beatSensitivity: number
+  /** Pick a new colour on every beat instead of using `color` / the preset's own palette. */
+  randomColor: boolean
   analyzer?: Partial<AnalyzerOptions>
 }
 
-export const DEFAULT_MUSIC_OPTIONS: MusicSyncOptions = { preset: 'rise', color: { r: 155, g: 255, b: 49 }, sensitivity: 1 }
+export const DEFAULT_MUSIC_OPTIONS: MusicSyncOptions = {
+  preset: 'rise',
+  color: { r: 155, g: 255, b: 49 },
+  sensitivity: 1,
+  beatSensitivity: 1,
+  randomColor: false,
+}
+
+/**
+ * Golden-angle hue stepping: successive colours are as far apart as possible, so a random sequence never repeats a
+ * shade twice in a row the way plain `Math.random()` RGB does.
+ */
+const GOLDEN_ANGLE = 0.618033988749895
+export function nextRandomColor(previousHue: number): { hue: number; color: RGB } {
+  const hue = (previousHue + GOLDEN_ANGLE + Math.random() * 0.08) % 1
+  return { hue, color: hsv(hue, 0.95, 1) }
+}
 
 export type StatusListener = (status: MusicSyncStatus) => void
 
@@ -24,6 +45,8 @@ export type StatusListener = (status: MusicSyncStatus) => void
 export interface FrameSource {
   frame(now: number): AudioFrame
   close(): Promise<void>
+  /** Live onset-sensitivity knob, when the source has one. */
+  setBeatSensitivity?(value: number): void
 }
 
 export interface EngineHooks {
@@ -54,6 +77,10 @@ export class MusicSyncEngine {
   private fpsWindow = 0
   private preset: MusicPreset
   private status: MusicSyncStatus
+  private readonly tempoTracker = new TempoTracker()
+  private beats = 0
+  private randomHue = Math.random()
+  private randomColor: RGB = { r: 255, g: 0, b: 0 }
   private readonly listeners = new Set<StatusListener>()
   lastFrame: AudioFrame | undefined
   options: MusicSyncOptions
@@ -64,7 +91,7 @@ export class MusicSyncEngine {
   ) {
     this.options = { ...DEFAULT_MUSIC_OPTIONS, ...options }
     this.preset = presetById(this.options.preset)
-    this.status = { running: false, preset: this.preset.id, fps: 0, sinks: [] }
+    this.status = { running: false, preset: this.preset.id, fps: 0, beats: 0, sinks: [] }
   }
 
   static presets(): MusicPreset[] {
@@ -142,6 +169,7 @@ export class MusicSyncEngine {
   update(patch: Partial<MusicSyncOptions>): void {
     this.options = { ...this.options, ...patch }
     if (patch.preset) this.preset = presetById(patch.preset)
+    if (patch.beatSensitivity !== undefined) this.source?.setBeatSensitivity?.(patch.beatSensitivity)
     this.setStatus({ preset: this.preset.id })
   }
 
@@ -153,11 +181,14 @@ export class MusicSyncEngine {
     this.source = opened.source
     this.stopSource = opened.stop
     opened.onEnded?.(() => void this.stop('Audio sharing ended'))
+    this.source.setBeatSensitivity?.(this.options.beatSensitivity)
     const now = this.now()
     this.startedAt = now
     this.fpsWindow = now
     this.frames = 0
-    this.setStatus({ running: true, source: kind, fps: 0, clock: opened.clock?.kind ?? 'frame' })
+    this.beats = 0
+    this.tempoTracker.reset()
+    this.setStatus({ running: true, source: kind, fps: 0, beats: 0, bpm: undefined, clock: opened.clock?.kind ?? 'frame' })
     await Promise.all([...this.sinks.values()].filter((e) => e.enabled).map((e) => this.prepareSink(e.sink)))
     if (!this.source) return // stopped while the sinks were being prepared
     if (opened.clock) {
@@ -187,9 +218,30 @@ export class MusicSyncEngine {
     const audio = this.source.frame(now)
     this.lastFrame = audio
     const t = (now - this.startedAt) / 1000
-    const ctx = { t, color: this.options.color, sensitivity: this.options.sensitivity }
+    if (audio.beat) {
+      this.beats++
+      this.tempoTracker.beat(now)
+      // Published per beat, not once a second: this counter is how a user checks that onsets are being found.
+      this.setStatus({ beats: this.beats, bpm: this.tempoTracker.tempo.bpm })
+      // A new colour per beat; the sinks' own rate limits decide how often the device actually follows it.
+      if (this.options.randomColor) {
+        const next = nextRandomColor(this.randomHue)
+        this.randomHue = next.hue
+        this.randomColor = next.color
+      }
+    }
+    const color = this.options.randomColor ? this.randomColor : this.options.color
+    const ctx = { t, color, sensitivity: this.options.sensitivity }
     const accent = this.preset.accent(audio, ctx)
-    const frame: MusicFrame = { audio, t, preset: this.preset.id, color: this.options.color, sensitivity: this.options.sensitivity, accent: accent.color, intensity: accent.intensity }
+    const frame: MusicFrame = {
+      audio,
+      t,
+      preset: this.preset.id,
+      color,
+      sensitivity: this.options.sensitivity,
+      accent: this.options.randomColor ? color : accent.color,
+      intensity: accent.intensity,
+    }
     for (const { sink, enabled } of this.sinks.values()) {
       if (!enabled) continue
       try {
@@ -200,7 +252,12 @@ export class MusicSyncEngine {
     }
     this.frames++
     if (now - this.fpsWindow >= 1000) {
-      this.setStatus({ fps: Math.round((this.frames * 1000) / (now - this.fpsWindow)), sinks: this.sinkStatuses() })
+      this.setStatus({
+        fps: Math.round((this.frames * 1000) / (now - this.fpsWindow)),
+        beats: this.beats,
+        bpm: this.tempoTracker.tempo.bpm,
+        sinks: this.sinkStatuses(),
+      })
       this.fpsWindow = now
       this.frames = 0
     }
@@ -241,7 +298,11 @@ async function defaultOpenSource(kind: AudioSourceKind, deviceId?: string, analy
     throw error
   }
   return {
-    source: { frame: (now: number) => analyzer.frame(now), close: () => analyzer.close() },
+    source: {
+      frame: (now: number) => analyzer.frame(now),
+      close: () => analyzer.close(),
+      setBeatSensitivity: (v: number) => analyzer.setBeatSensitivity(v),
+    },
     clock: analyzer.clock(),
     stop: () => capture.stop(),
     onEnded: (cb: () => void) => capture.stream.getAudioTracks()[0]?.addEventListener('ended', cb),

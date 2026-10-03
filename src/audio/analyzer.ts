@@ -6,20 +6,32 @@ export interface AnalyzerOptions {
   fftSize: number
   /** AnalyserNode smoothing (0..1). */
   smoothing: number
-  /** Beat threshold: bass energy must exceed this × its running average. */
+/**
+   * How far above the running spectral-flux average an onset must rise, in standard deviations. Lower = more beats.
+   */
   beatThreshold: number
   minBeatIntervalMs: number
 }
 
-export const DEFAULT_ANALYZER: AnalyzerOptions = { bands: 24, fftSize: 2048, smoothing: 0.55, beatThreshold: 1.35, minBeatIntervalMs: 120 }
+export const DEFAULT_ANALYZER: AnalyzerOptions = { bands: 24, fftSize: 2048, smoothing: 0.55, beatThreshold: 1.6, minBeatIntervalMs: 140 }
+
+/** Frames of spectral flux kept for the adaptive threshold (≈ 1 s at the audio-thread tick rate). */
+const FLUX_WINDOW = 48
 
 /** Pure FFT-bin → log-spaced band mapping and feature extraction, kept separate from Web Audio for tests. */
 export class FeatureExtractor {
   private readonly edges: number[]
   private readonly bandBuf: Float32Array
-  private bassAvg = 0
+  private readonly prevBands: Float32Array
+  private readonly fluxHistory: number[] = []
+  private fluxPeak = 1e-4
   private lastBeat = -Infinity
   private peak = 0.05
+  /**
+   * Multiplies how easily onsets are reported: 1 = as configured, >1 = more beats. The user can move this while a
+   * session runs (quiet or bass-light material needs a higher value).
+   */
+  beatSensitivity = 1
 
   constructor(
     readonly options: AnalyzerOptions,
@@ -31,6 +43,7 @@ export class FeatureExtractor {
     const hi = Math.min(16000, nyquist)
     this.edges = Array.from({ length: options.bands + 1 }, (_, i) => Math.round((lo * Math.pow(hi / lo, i / options.bands)) / (nyquist / binCount)))
     this.bandBuf = new Float32Array(options.bands)
+    this.prevBands = new Float32Array(options.bands)
   }
 
   private bandLevel(mag: Uint8Array, fromHz: number, toHz: number): number {
@@ -64,14 +77,40 @@ export class FeatureExtractor {
     const bass = this.bandLevel(mag, 40, 160)
     const mid = this.bandLevel(mag, 160, 2000)
     const treble = this.bandLevel(mag, 2000, 12000)
-    this.bassAvg = this.bassAvg * 0.94 + bass * 0.06
+    /*
+     * Onset detection by spectral flux: the sum of how much each band *rose* since the last frame, weighted toward
+     * the low end. Unlike a raw bass-energy gate this needs no absolute loudness — a quiet stream or a bass-light
+     * track produces the same flux shape as a loud one — and it fires on any percussive attack, not only kicks.
+     * The threshold follows the recent average plus a few standard deviations, so it adapts to the material.
+     */
+    let flux = 0
+    for (let i = 0; i < bands.length; i++) {
+      const rise = bands[i]! - this.prevBands[i]!
+      if (rise > 0) flux += rise * (i < bands.length / 3 ? 1.5 : 1)
+    }
+    flux /= bands.length
+    this.prevBands.set(bands)
+    const hist = this.fluxHistory
+    let mean = 0
+    for (const f of hist) mean += f
+    mean = hist.length ? mean / hist.length : 0
+    let variance = 0
+    for (const f of hist) variance += (f - mean) * (f - mean)
+    const sd = hist.length ? Math.sqrt(variance / hist.length) : 0
+    const k = Math.max(0.2, this.beatSensitivity)
+    const threshold = mean + sd * (this.options.beatThreshold / k)
+    // Peak-relative floor (decaying, like the level AGC) so steady noise never registers as a stream of onsets.
+    this.fluxPeak = Math.max(flux, this.fluxPeak * 0.998, 1e-4)
+    const floor = this.fluxPeak * (0.12 / k)
     let beat = false
     let beatStrength = 0
-    if (bass > 0.08 && bass > this.bassAvg * this.options.beatThreshold && now - this.lastBeat > this.options.minBeatIntervalMs) {
+    if (hist.length >= 8 && flux > Math.max(threshold, floor) && now - this.lastBeat > this.options.minBeatIntervalMs) {
       beat = true
-      beatStrength = Math.min(1, (bass - this.bassAvg) / Math.max(0.05, this.bassAvg))
+      beatStrength = Math.min(1, (flux - threshold) / Math.max(threshold, this.fluxPeak * 0.25))
       this.lastBeat = now
     }
+    hist.push(flux)
+    if (hist.length > FLUX_WINDOW) hist.shift()
     return { time: now, level, bands: Float32Array.from(bands), bass, mid, treble, beat, beatStrength }
   }
 }
@@ -95,6 +134,11 @@ export class AudioAnalyzer {
     this.mag = new Uint8Array(new ArrayBuffer(this.analyser.frequencyBinCount))
     this.time = new Uint8Array(new ArrayBuffer(this.analyser.fftSize))
     this.extractor = new FeatureExtractor(options, this.ctx.sampleRate, this.analyser.frequencyBinCount)
+  }
+
+  /** Live knob: >1 reports more onsets. */
+  setBeatSensitivity(value: number): void {
+    this.extractor.beatSensitivity = value
   }
 
   async resume(): Promise<void> {
