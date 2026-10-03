@@ -11,6 +11,7 @@ import type {
 import { createSimCompxMouse } from '@/sim/compx/device'
 import type { MusicFrame } from '../types'
 import {
+  ASLEEP_NOTE,
   BUDGET_NOTE,
   MouseSink,
   bandsToLevels,
@@ -657,7 +658,7 @@ describe('MouseSink when the mouse cannot keep up', () => {
       await flush()
     }
     const during = music.effects.length
-    expect(during).toBeLessThan(20) // not one write per beat while the device is failing
+    expect(during).toBeLessThanOrEqual(20) // paced down to about half of one write per beat while it is failing
     expect(sink.status().note).toMatch(/not keeping up/)
     expect(sink.status().error).toBeUndefined() // a timeout is a pacing signal, not a session-breaking error
     expect(sink.status().active).toBe(true)
@@ -684,15 +685,42 @@ describe('MouseSink keep-alive', () => {
     expect(sink.missedKeepAlives).toBe(0)
   })
 
-  it('counts unanswered pings so a mouse that is asleep anyway can be told apart', async () => {
+  it('stops writing while the mouse is asleep and resumes the moment it answers again', async () => {
     const music = new StubMusic({ flashLight: true })
-    music.pingFails = true
-    const sink = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'pulse', keepAliveMs: 200, keepAwakeMs: 0 })
+    const sink = new MouseSink('m', 'Mouse', driverWith(music), {
+      prefer: 'strobe',
+      keepAliveMs: 200,
+      keepAwakeMs: 0,
+      strobeFps: 50,
+    })
     await sink.prepare()
-    await sweep(sink, 0, 2000, 100)
-    expect(sink.missedKeepAlives).toBeGreaterThan(2)
-    expect(sink.status().active).toBe(true) // a missed ping is information, not a failure
-    expect(sink.status().error).toBeUndefined()
+    // A beat every fourth frame, so each blink is a lit write and a dark one.
+    const beats = async (from: number, to: number) => {
+      for (let t = from; t <= to; t += 50) {
+        sink.push(frame(t, { beat: (t / 50) % 4 === 0, beatStrength: 1 }))
+        await flush()
+      }
+    }
+    await beats(0, 1000)
+    const awake = music.effects.length
+    expect(awake).toBeGreaterThan(2)
+
+    // The mouse stops answering: no point queueing writes that will time out one after another.
+    music.pingFails = true
+    await beats(1100, 4000)
+    expect(sink.missedKeepAlives).toBeGreaterThanOrEqual(2)
+    expect(sink.status().note).toBe(ASLEEP_NOTE)
+    expect(sink.status().error).toBeUndefined() // asleep is information, not a failure
+    const whileAsleep = music.effects.length
+    // ~14 beats passed while it was asleep; only the couple before the missed pings added up got written.
+    expect(whileAsleep - awake).toBeLessThanOrEqual(6)
+
+    // …and the moment it answers, full rate again rather than a slow climb back.
+    music.pingFails = false
+    await beats(4100, 6000)
+    expect(music.effects.length).toBeGreaterThan(whileAsleep + 4)
+    expect(sink.status().note).toBeUndefined()
+    expect(sink.missedKeepAlives).toBe(0)
   })
 
   it('can be switched off', async () => {

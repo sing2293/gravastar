@@ -125,7 +125,11 @@ is JSON of these types; vendor profile files are converted at the edge.
   (`0xB9`). All three are restored on release — they cost battery and are the user's settings, not ours. A session
   also sends a keep-alive `DeviceOnLine` read roughly once a second (`keepAliveMs`): it writes nothing, keeps the
   radio link busy, and counts unanswered replies, which is the one signal that tells "the mouse is asleep" apart
-  from "the lights are wrong".
+  from "the lights are wrong". That signal drives the pacing: once the mouse stops answering, the sink stops writing
+  entirely (queueing writes at a sleeping mouse just fills the link with requests that time out one after another)
+  and resumes at full rate the moment a ping comes back — the keep-alive itself keeps running throughout, since it
+  is the only thing that can notice. The timeout backoff is capped at 3× and halves on each success, because a
+  multiplier that only creeps back down is indistinguishable from staying broken.
 - Latency matters as much as throughput: `AnalyserNode.smoothingTimeConstant` is an exponential average of the FFT,
   so it is delay between the sound and the light (0.2, down from 0.55), and the audio-thread clock runs a 512-sample
   buffer (~11 ms) rather than 1024. Before any body-light strategy runs, `enterLightSession` switches the light on and clears

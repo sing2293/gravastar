@@ -113,6 +113,11 @@ export interface MouseMusicSnapshotReader {
 }
 
 export const BUDGET_NOTE = 'write budget reached — mouse paused to protect its memory'
+/** Hard ceiling on the pacing multiplier: beyond this the lights are visibly broken anyway. */
+const MAX_BACKOFF = 3
+/** Unanswered keep-alives before the mouse counts as asleep. */
+export const ASLEEP_AFTER_MISSES = 2
+export const ASLEEP_NOTE = 'the mouse has gone to sleep — waiting for it to wake (move it, or turn its power saving off in Settings)'
 
 const MODE_LABEL: Record<MouseSinkStrategy, MouseSinkMode> = {
   amplitude: 'amplitude',
@@ -393,7 +398,12 @@ export class MouseSink implements LightingSink {
     const react = this.reaction(frame, now)
     if (react.fire) this.tempo.beat(now)
     if (this.strategy !== 'dongle') this.pushBar(frame, now)
+    // Always first: the keep-alive is the only thing that notices the mouse waking up again, so it must keep
+    // running even while we have given up on writing to it.
     this.keepAlive(now)
+    // A mouse that stopped answering keep-alives will not service writes either; queueing them just fills the link
+    // with requests that time out one after another. Wait for a ping to come back.
+    if (this.missedPings >= ASLEEP_AFTER_MISSES) return
     this.keepAwake(now)
     if (this.inFlight) return
     let write: Promise<void>
@@ -423,10 +433,11 @@ export class MouseSink implements LightingSink {
       case 'strobe': {
         // Pure software blink: light up on the onset, write the dark frame once the flash has been seen.
         const beat = react.fire && react.strength >= this.options.strobeBeatThreshold
-        // A beat always gets its flash; only the dark frame waits for the pacing gate.
-        // A beat always gets its flash — unless the mouse is behind, in which case it must be given room.
-        if (now - this.lastSend < this.minGapMs) return
-        if (!beat && now - this.lastSend < (1000 / this.options.strobeFps) * this.backoff) return
+        // A beat gets its flash immediately while the mouse is keeping up; once it is behind, beats are paced too,
+        // or the backoff would never actually slow anything down.
+        const gate = (1000 / this.options.strobeFps) * this.backoff
+        const needed = beat ? Math.max(this.minGapMs, this.backoff > 1 ? gate : 0) : gate
+        if (now - this.lastSend < needed) return
         const lit = beat || (this.litSince !== undefined && now - this.litSince < this.options.strobeOnMs)
         // A beat restarts the flash window, so a run of close beats stays lit rather than going dark between them.
         if (beat) this.litSince = now
@@ -467,7 +478,14 @@ export class MouseSink implements LightingSink {
         this.error = undefined
         if (memory) {
           this.writeMs = Math.round(nowMs() - startedAt)
-          if (this.backoff > 1) this.backoff = Math.max(1, this.backoff * 0.9)
+          // Recover quickly: a slow climb back from the ceiling is indistinguishable from staying broken.
+          if (this.backoff > 1) {
+            this.backoff = Math.max(1, this.backoff * 0.55)
+            if (this.backoff <= 1.05) {
+              this.backoff = 1
+              this.note = undefined
+            }
+          }
         }
       })
       .catch((e: Error) => {
@@ -475,7 +493,7 @@ export class MouseSink implements LightingSink {
         // rather than keep hammering it; a run of successes winds this back down.
         if (/timed out|timeout/i.test(e.message)) {
           this.timeouts++
-          this.backoff = Math.min(8, this.backoff * 1.6)
+          this.backoff = Math.min(MAX_BACKOFF, this.backoff * 1.5)
           this.note = `the mouse is not keeping up with live writes (${this.timeouts} missed); slowing down`
         } else this.error = e.message
       })
@@ -551,10 +569,16 @@ export class MouseSink implements LightingSink {
     this.music
       .ping()
       .then(() => {
-        this.missedPings = 0
+        // Answering again means it is awake: resume at full rate instead of crawling back up from the backoff.
+        if (this.missedPings > 0) {
+          this.missedPings = 0
+          this.backoff = 1
+          this.note = undefined
+        }
       })
       .catch(() => {
         this.missedPings++
+        if (this.missedPings === ASLEEP_AFTER_MISSES) this.note = ASLEEP_NOTE
       })
       .finally(() => {
         this.pinging = false
