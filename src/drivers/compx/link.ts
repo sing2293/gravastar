@@ -132,6 +132,26 @@ export class CompxLink {
     }
   }
 
+  /**
+   * `WriteFlashData` without waiting for the echo. For real-time lighting on a mouse that answers slowly when idle:
+   * the frame goes out at USB speed and the next can follow at once. Nothing confirms it landed — a dozing mouse may
+   * drop some — so the shadow is updated optimistically and callers must not rely on it for anything but lights.
+   */
+  async writeArrayUnconfirmed(addr: number, bytes: ArrayLike<number>): Promise<void> {
+    const data = Uint8Array.from(bytes)
+    for (let i = 0; i < data.length; i += PAYLOAD_MAX) {
+      const chunk = data.subarray(i, i + PAYLOAD_MAX)
+      await this.send(buildFrame({ command: Command.WriteFlashData, address: addr + i, payload: Array.from(chunk) }))
+      this.flash.set(chunk, addr + i)
+    }
+  }
+
+  async writeValueUnconfirmed(addr: number, value: number): Promise<void> {
+    const pair = complementPair(value)
+    await this.send(buildFrame({ command: Command.WriteFlashData, address: addr, payload: pair }))
+    this.flash.set(pair, addr)
+  }
+
   async close(): Promise<void> {
     this.unsubscribe()
     this.statusListeners.clear()

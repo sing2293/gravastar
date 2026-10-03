@@ -57,6 +57,10 @@ class StubMusic implements MouseMusicService {
     return this.pingFails ? Promise.reject(new Error('no answer')) : Promise.resolve()
   }
   pingFails = false
+  writeMode: 'confirmed' | 'fire' = 'confirmed'
+  setWriteMode(mode: 'confirmed' | 'fire'): void {
+    this.writeMode = mode
+  }
   async restore(): Promise<void> {
     this.calls.push('restore')
   }
@@ -649,7 +653,7 @@ describe('MouseSink when the mouse cannot keep up', () => {
       }
     }
     const music = new SlowMouse({ flashLight: true })
-    const sink = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'strobe', strobeFps: 20 })
+    const sink = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'strobe', strobeFps: 20, forceWrites: false })
     await sink.prepare()
     music.timeout = true
     // A beat every 200 ms with quiet frames between, so each blink is a lit write and a dark one.
@@ -701,6 +705,48 @@ describe('MouseSink on a slow idle link', () => {
   })
 })
 
+describe('MouseSink force mode', () => {
+  it('fires writes without confirmation and never slows down or stops, however the mouse behaves', async () => {
+    class DozingMouse extends StubMusic {
+      timeout = false
+      setLightEffect(effect: MouseLightEffect): Promise<void> {
+        this.calls.push('setLightEffect')
+        this.effects.push(effect)
+        return this.timeout ? Promise.reject(new Error('mouse command 0x7 timed out after 900ms')) : Promise.resolve()
+      }
+    }
+    const music = new DozingMouse({ flashLight: true })
+    const sink = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'strobe', strobeFps: 50, keepAliveMs: 200 })
+    await sink.prepare()
+    expect(sink.options.forceWrites).toBe(true) // the default
+    expect(music.writeMode).toBe('fire')
+
+    const beats = async (from: number, to: number) => {
+      for (let t = from; t <= to; t += 50) {
+        sink.push(frame(t, { beat: (t / 50) % 4 === 0, beatStrength: 1 }))
+        await flush()
+      }
+    }
+    await beats(0, 2000)
+    const healthy = music.effects.length
+    // Every reply times out and every keep-alive is missed: forced mode keeps sending at the same rate regardless.
+    music.timeout = true
+    music.pingFails = true
+    await beats(2050, 4050)
+    expect(music.effects.length - healthy).toBeGreaterThanOrEqual(healthy - 2)
+    expect(sink.status().active).toBe(true)
+    expect(sink.status().note).toMatch(/still sending \(forced\)/)
+    expect(sink.status().error).toBeUndefined()
+  })
+
+  it('switching force off restores confirmed writes and the pacing', async () => {
+    const music = new StubMusic({ flashLight: true })
+    const sink = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'strobe', forceWrites: false })
+    await sink.prepare()
+    expect(music.writeMode).toBe('confirmed')
+  })
+})
+
 describe('MouseSink keep-alive', () => {
   it('pings the mouse steadily so it never sees an idle gap, without spending memory writes', async () => {
     const music = new StubMusic({ flashLight: true })
@@ -720,6 +766,7 @@ describe('MouseSink keep-alive', () => {
       keepAliveMs: 200,
       keepAwakeMs: 0,
       strobeFps: 50,
+      forceWrites: false,
     })
     await sink.prepare()
     // A beat every fourth frame, so each blink is a lit write and a dark one.

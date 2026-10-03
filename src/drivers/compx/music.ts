@@ -288,6 +288,12 @@ export class CompxMusic implements MouseMusicService {
   /** Power-saving bytes a session is holding, with the values to put back. */
   private awakeHeld: { state?: number; time?: number; sensorMode?: number } | undefined
 
+  private writeMode: 'confirmed' | 'fire' = 'confirmed'
+
+  setWriteMode(mode: 'confirmed' | 'fire'): void {
+    this.writeMode = mode
+  }
+
   /** The user's own sleep/light-off byte while a session is holding the hardware value at the maximum. */
   get heldSleepByte(): number | undefined {
     return this.sleepByteHeld
@@ -311,7 +317,8 @@ export class CompxMusic implements MouseMusicService {
   /** One value write: the light's on byte. Used to wake a bar the firmware has blanked. */
   async setLightOn(): Promise<void> {
     this.flashWrites++
-    await this.host.hid.writeValue(Addr.LightState, 1, STREAM_REQUEST)
+    if (this.writeMode === 'fire') await this.host.hid.writeValueUnconfirmed(Addr.LightState, 1)
+    else await this.host.hid.writeValue(Addr.LightState, 1, STREAM_REQUEST)
   }
 
   /** 0x19; `undefined` when the receiver has no bar. */
@@ -441,21 +448,21 @@ export class CompxMusic implements MouseMusicService {
   async setLightEffect(effect: MouseLightEffect): Promise<void> {
     const cur = await this.host.lighting.get() // local flash shadow, no bus traffic
     const hid = this.host.hid
+    const fire = this.writeMode === 'fire'
     if (!cur.on) {
       this.flashWrites++
-      await hid.writeValue(Addr.LightState, 1)
+      if (fire) await hid.writeValueUnconfirmed(Addr.LightState, 1)
+      else await hid.writeValue(Addr.LightState, 1)
     }
     this.flashWrites++
-    await hid.writeArray(
-      Addr.Light,
-      encodeLightBlock({
-        mode: effect.mode,
-        color: effect.color,
-        speed: clamp(Math.round(effect.speed) || 0, 0, LIGHT_SPEED_MAX),
-        brightness: clamp(Math.round(effect.brightness) || 0, 0, LIGHT_BRIGHTNESS_MAX),
-      }),
-      STREAM_REQUEST,
-    )
+    const block = encodeLightBlock({
+      mode: effect.mode,
+      color: effect.color,
+      speed: clamp(Math.round(effect.speed) || 0, 0, LIGHT_SPEED_MAX),
+      brightness: clamp(Math.round(effect.brightness) || 0, 0, LIGHT_BRIGHTNESS_MAX),
+    })
+    if (fire) await hid.writeArrayUnconfirmed(Addr.Light, block)
+    else await hid.writeArray(Addr.Light, block, STREAM_REQUEST)
   }
 
   async setLightColor(color: RGB, brightness: number): Promise<void> {

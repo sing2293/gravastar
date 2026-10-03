@@ -55,6 +55,12 @@ export interface MouseSinkOptions {
   /** Strobe mode: beats weaker than this (0..1) do not flash. */
   strobeBeatThreshold: number
   /**
+   * Force mode: light writes go out without waiting for the mouse to confirm them, and nothing ever slows the
+   * animation down — no backoff, no "asleep" pause. A dozing mouse may drop frames, but it is never left waiting.
+   * This is what makes a mouse that answers slowly when idle keep flashing instead of grinding to a halt.
+   */
+  forceWrites: boolean
+  /**
    * How often to send a harmless keep-alive read while a session runs, so the mouse keeps seeing traffic and does
    * not decide it is idle. Costs no settings-memory writes. 0 disables.
    */
@@ -89,6 +95,7 @@ export const DEFAULT_MOUSE_SINK_OPTIONS: MouseSinkOptions = {
   strobeFps: 14,
   strobeOnMs: 60,
   strobeBeatThreshold: 0.12,
+  forceWrites: true,
   keepAliveMs: 900,
   keepAwakeMs: 5_000,
   reactTo: 'beat',
@@ -361,6 +368,7 @@ export class MouseSink implements LightingSink {
       }
       // A body light that the firmware blanks while the mouse moves would make any animation invisible.
       if (strategy === 'pulse' || strategy === 'strobe' || strategy === 'gentle') {
+        this.music.setWriteMode?.(this.options.forceWrites ? 'fire' : 'confirmed')
         try {
           await this.music.enterLightSession()
           if ((this.music as MouseMusicService & MouseMusicSnapshotReader).idleTimerHeld === false)
@@ -405,8 +413,9 @@ export class MouseSink implements LightingSink {
     // running even while we have given up on writing to it.
     this.keepAlive(now)
     // A mouse that stopped answering keep-alives will not service writes either; queueing them just fills the link
-    // with requests that time out one after another. Wait for a ping to come back.
-    if (this.missedPings >= ASLEEP_AFTER_MISSES) return
+    // with requests that time out one after another. Wait for a ping to come back — unless forced, in which case
+    // the writes cost nothing to send and the mouse picks up whatever it can.
+    if (!this.options.forceWrites && this.missedPings >= ASLEEP_AFTER_MISSES) return
     this.keepAwake(now)
     if (this.inFlight) return
     let write: Promise<void>
@@ -496,8 +505,10 @@ export class MouseSink implements LightingSink {
         // rather than keep hammering it; a run of successes winds this back down.
         if (/timed out|timeout/i.test(e.message)) {
           this.timeouts++
-          this.backoff = Math.min(MAX_BACKOFF, this.backoff * 1.5)
-          this.note = `the mouse is not keeping up with live writes (${this.timeouts} missed); slowing down`
+          if (!this.options.forceWrites) {
+            this.backoff = Math.min(MAX_BACKOFF, this.backoff * 1.5)
+            this.note = `the mouse is not keeping up with live writes (${this.timeouts} missed); slowing down`
+          }
         } else this.error = e.message
       })
       .finally(() => {
@@ -581,7 +592,10 @@ export class MouseSink implements LightingSink {
       })
       .catch(() => {
         this.missedPings++
-        if (this.missedPings === ASLEEP_AFTER_MISSES) this.note = ASLEEP_NOTE
+        if (this.missedPings === ASLEEP_AFTER_MISSES)
+          this.note = this.options.forceWrites
+            ? 'the mouse is not confirming anything right now — still sending (forced); move it, or turn its power saving off in Settings'
+            : ASLEEP_NOTE
       })
       .finally(() => {
         this.pinging = false
@@ -624,6 +638,7 @@ export class MouseSink implements LightingSink {
    * been digested is what makes `0x07` time out. 1.3 × the measured round-trip leaves it headroom.
    */
   private get minGapMs(): number {
+    if (this.options.forceWrites) return 0
     return this.writeMs > 0 ? this.writeMs * 1.3 * this.backoff : 0
   }
 
@@ -713,7 +728,7 @@ export class MouseSink implements LightingSink {
    * saying plainly — it is the difference between "this is broken" and "your mouse is dozing".
    */
   private pacingNote(): string | undefined {
-    if (this.writeMs < SLOW_WRITE_MS) return undefined
+    if (this.options.forceWrites || this.writeMs < SLOW_WRITE_MS) return undefined
     return `the mouse is answering slowly (${this.writeMs} ms per write) — it slows its radio down when it sits still; move it, or turn its power saving off in Settings`
   }
 

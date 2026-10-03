@@ -114,7 +114,12 @@ is JSON of these types; vendor profile files are converted at the edge.
   freezing behind them. The timeout is long on purpose: a 2.4 GHz mouse that has sat still slows its radio right
   down, so a write that lands in 20 ms while the mouse is in use takes several hundred once it is idle — calling that
   a failure (an earlier 350 ms) is what made the lights *stop* when the mouse was left alone instead of merely
-  lagging. The status line now says "answering slowly (N ms per write)" when that is what is happening. The sink measures each write's round-trip, refuses to issue another inside 1.3 × that, and
+  lagging. The status line now says "answering slowly (N ms per write)" when that is what is happening. And the
+  default is now to not wait at all: **force mode** (`forceWrites`, on by default) sends light writes
+  fire-and-forget (`writeArrayUnconfirmed`, no echo wait), with no backoff and no "asleep" pause — the mouse is in
+  hand, the echo comes back in 20 ms and nothing is lost; idle, it answers in hundreds of ms and the alternative is
+  the animation stalling behind each confirmation. Frames a dozing mouse drops are simply dropped. The toggle is in
+  the mouse Music tab for anyone who wants confirmed writes and the pacing back. The sink measures each write's round-trip, refuses to issue another inside 1.3 × that, and
   multiplies every gate by a backoff that grows on timeouts and decays on success — a mouse that cannot keep up is
   given room instead of being hammered. `enterLightSession` also parks the sleep / light-off byte (`0xAD`) at its
   maximum for the session, because its stock 10–60 s idle timer otherwise blanks the bar part-way through a track;

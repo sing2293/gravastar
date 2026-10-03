@@ -264,6 +264,11 @@ export interface MouseMusicService {
    */
   ping(): Promise<void>
   /**
+   * `fire`: light writes go out without waiting for the mouse to confirm them, so a slow idle link never throttles
+   * the animation (some frames may be dropped). `confirmed` (default) waits for each echo.
+   */
+  setWriteMode?(mode: 'confirmed' | 'fire'): void
+  /**
    * Light-bar block write in settings memory (mode included, so the firmware's own breathing can be used instead of
    * driving every frame from the host). Every call is an erase cycle: callers decide the rate. The shipped sink
    * paces pulse mode hard and lets strobe write on every beat with no cap, which is a deliberate choice — these

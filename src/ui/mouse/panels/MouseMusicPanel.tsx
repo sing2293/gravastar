@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { musicEngine } from '@/audio/musicSync'
 import { MouseSink, type MouseReaction, type MouseSinkOptions } from '@/audio/sinks/mouseSink'
-import { Button, Field, Notice, Select, Slider } from '@/ui/components/kit'
+import { Button, Field, Notice, Select, Slider, Toggle } from '@/ui/components/kit'
 import { DevicesCard, LiveCard, LookCard, MOUSE_MEMORY_NOTE, SourceCard, useMusicStatus, useMusicUi } from '@/ui/music'
 import type { MousePanelProps } from '../MousePage'
 
@@ -41,6 +41,7 @@ export function MouseMusicPanel({ id, caps }: MousePanelProps) {
   const [path, setPath] = useState<Path>(sink?.options.prefer ?? 'auto')
   const [speedOffset, setSpeedOffset] = useState(sink?.options.pulseSpeedOffset ?? 0)
   const [reactTo, setReactTo] = useState<MouseReaction>(sink?.options.reactTo ?? 'beat')
+  const [force, setForce] = useState(sink?.options.forceWrites ?? true)
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<string>()
   // The store registers the sink asynchronously; pick up its options once it exists.
@@ -49,6 +50,7 @@ export function MouseMusicPanel({ id, caps }: MousePanelProps) {
     setPath(sink.options.prefer ?? 'auto')
     setSpeedOffset(sink.options.pulseSpeedOffset)
     setReactTo(sink.options.reactTo)
+    setForce(sink.options.forceWrites)
   }, [sink])
   const mine = status.sinks.find((s) => s.id === id)
   const pulsing = mine?.mode === 'pulse (firmware breathing)'
@@ -115,6 +117,23 @@ export function MouseMusicPanel({ id, caps }: MousePanelProps) {
                 setReactTo(v)
                 if (sink) sink.options = { ...sink.options, reactTo: v }
               }}
+            />
+          </Field>
+          <Field
+            label="Force writes"
+            hint="Sends each light change without waiting for the mouse to confirm it. A mouse that has sat still answers slowly, and waiting for it is what made the lights grind to a halt — forced, it keeps flashing and the mouse shows whatever it catches. Applies the next time music sync starts."
+          >
+            <Toggle
+              checked={force}
+              disabled={!sink}
+              onChange={(v) => {
+                setForce(v)
+                if (sink) {
+                  sink.options = { ...sink.options, forceWrites: v }
+                  void musicEngine.refreshSink(id)
+                }
+              }}
+              label={force ? 'On — never waits, never slows down' : 'Off — waits for confirmation, slows down when the mouse does'}
             />
           </Field>
           <Field
