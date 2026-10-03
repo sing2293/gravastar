@@ -303,6 +303,8 @@ export interface MouseDriver extends DriverBase<MouseEvents> {
   readonly profiles: MouseProfileService
   readonly dongle?: DongleService
   readonly music?: MouseMusicService
+  /** Re-reads the settings image from the device, so the UI can confirm what it actually holds. */
+  syncFromDevice(): Promise<void>
   factoryReset(): Promise<void>
   /** Raw 16 KiB settings image, for export/import (`.bin`, Compx-compatible). */
   exportSettings(): Promise<Uint8Array>

@@ -1,9 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
 import type { SensorSettings } from '@/model/mouse'
+import { useMusicStatus } from '@/ui/music'
 import { Button, Card, Field, Notice, Select, Toggle } from '@/ui/components/kit'
 import type { MousePanelProps } from '../MousePage'
 
-export function MouseSettingsPanel({ driver, caps, summary }: MousePanelProps) {
+export function MouseSettingsPanel({ id, driver, caps, summary }: MousePanelProps) {
+  const musicStatus = useMusicStatus()
+  // While a session holds the power bytes, writes here are remembered and applied when it stops — say so, or the
+  // controls look broken.
+  const heldByMusic = musicStatus.running && (musicStatus.sinks.find((s) => s.id === id)?.active ?? false)
   const [sleep, setSleep] = useState<number>()
   const [power, setPower] = useState<Pick<SensorSettings, 'performanceMode' | 'performanceSeconds' | 'sensorMode'>>()
   const [powerSupported, setPowerSupported] = useState(false)
@@ -49,6 +54,21 @@ export function MouseSettingsPanel({ driver, caps, summary }: MousePanelProps) {
     }
   }
 
+  /** Writes, then reports what the mouse actually holds afterwards — a silent control is impossible to debug. */
+  const change = async (label: string, fn: () => Promise<void>, read: () => Promise<string>) => {
+    await run(async () => {
+      await fn()
+      await driver.syncFromDevice()
+    })
+    try {
+      setNotice(`${label}: the mouse now reports ${await read()}.`)
+    } catch {
+      /* the read-back is a courtesy, not the operation */
+    }
+  }
+
+  const sleepLabel = (s: number) => (s < 60 ? `${s} s` : `${s / 60} min`)
+
   const exportSettings = async () => {
     const bytes = await driver.exportSettings()
     const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: 'application/octet-stream' }))
@@ -76,6 +96,12 @@ export function MouseSettingsPanel({ driver, caps, summary }: MousePanelProps) {
               until you move it again. These three settings are what decide that. Music sync holds them open while it
               runs and puts them back afterwards — turn them off here to keep the mouse awake all the time.
             </div>
+            {heldByMusic && (
+              <Notice>
+                Music sync is running and is holding these open for this device. Changes you make here are applied when
+                you stop it.
+              </Notice>
+            )}
             <div className="row">
               <Button
                 variant="primary"
@@ -103,15 +129,33 @@ export function MouseSettingsPanel({ driver, caps, summary }: MousePanelProps) {
               >
                 Back to battery saving
               </Button>
+              <Button disabled={busy} onClick={() => void change('Settings', () => Promise.resolve(), async () => 'the values shown here')}>
+                Re-read from mouse
+              </Button>
             </div>
             <Field label="Sleep / light-off after" hint="Also turns the light bar off once the mouse has been still this long.">
-              <Select value={sleep ?? 10} options={driver.power.options().map((s) => ({ value: s, label: s < 60 ? `${s} s` : `${s / 60} min` }))} onChange={(v) => void run(() => driver.power.setSleepSeconds(v))} disabled={busy || sleep === undefined} />
+              <Select
+                value={sleep ?? 10}
+                options={driver.power.options().map((s) => ({ value: s, label: sleepLabel(s) }))}
+                onChange={(v) => void change('Sleep / light-off', () => driver.power.setSleepSeconds(v), async () => sleepLabel(await driver.power.getSleepSeconds()))}
+                disabled={busy || sleep === undefined}
+              />
             </Field>
             {power && (
               <>
-                <Toggle checked={power.performanceMode} onChange={(v) => void run(() => driver.sensor.update('performanceMode', v))} disabled={busy} label="Highest performance (keeps the mouse fully awake)" />
+                <Toggle
+                  checked={power.performanceMode}
+                  onChange={(v) => void change('Highest performance', () => driver.sensor.update('performanceMode', v), async () => ((await driver.sensor.get()).performanceMode ? 'on' : 'off'))}
+                  disabled={busy}
+                  label="Highest performance (keeps the mouse fully awake)"
+                />
                 <Field label="Highest performance for">
-                  <Select value={power.performanceSeconds} options={driver.power.options().map((s) => ({ value: s, label: s < 60 ? `${s} s` : `${s / 60} min` }))} onChange={(v) => void run(() => driver.sensor.update('performanceSeconds', v))} disabled={busy || !power.performanceMode} />
+                  <Select
+                    value={power.performanceSeconds}
+                    options={driver.power.options().map((s) => ({ value: s, label: sleepLabel(s) }))}
+                    onChange={(v) => void change('Highest performance time', () => driver.sensor.update('performanceSeconds', v), async () => sleepLabel((await driver.sensor.get()).performanceSeconds))}
+                    disabled={busy || !power.performanceMode}
+                  />
                 </Field>
                 <Field label="Sensor mode" hint="Low power saves battery; high performance keeps latency down and the mouse responsive.">
                   <Select
@@ -120,7 +164,7 @@ export function MouseSettingsPanel({ driver, caps, summary }: MousePanelProps) {
                       { value: 'lowPower', label: 'Low power' },
                       { value: 'highPerformance', label: 'High performance' },
                     ]}
-                    onChange={(v) => void run(() => driver.sensor.update('sensorMode', v))}
+                    onChange={(v) => void change('Sensor mode', () => driver.sensor.update('sensorMode', v), async () => (await driver.sensor.get()).sensorMode)}
                     disabled={busy || power.sensorMode === 'corded'}
                   />
                 </Field>
