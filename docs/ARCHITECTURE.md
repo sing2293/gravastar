@@ -118,7 +118,11 @@ is JSON of these types; vendor profile files are converted at the edge.
   the whole light block is re-asserted every `keepAwakeMs` (5 s) as well — pulse mode writes nothing on its own once
   the look is steady, so without it a mouse left untouched goes dark and stays dark — and the power service reports
   the user's own sleep value while the session holds the hardware one. The idle-timer write is read back; if the
-  mouse refused it, the sink says so rather than leaving the user guessing.
+  mouse refused it, the sink says so rather than leaving the user guessing. The deciding factor on hardware turned
+  out to be **power saving, not the light**: a wireless mouse left untouched for ~10 s stops servicing writes (which
+  is also where the `0x07` timeouts came from) and resumes the instant it is moved, so a session also holds the
+  firmware's "highest performance" switch (`0xB5`, hold time `0xB7` at 900 s) and high-performance sensor mode
+  (`0xB9`). All three are restored on release — they cost battery and are the user's settings, not ours.
 - Latency matters as much as throughput: `AnalyserNode.smoothingTimeConstant` is an exponential average of the FFT,
   so it is delay between the sound and the light (0.2, down from 0.55), and the audio-thread clock runs a 512-sample
   buffer (~11 ms) rather than 1024. Before any body-light strategy runs, `enterLightSession` switches the light on and clears

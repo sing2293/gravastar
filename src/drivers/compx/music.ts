@@ -48,6 +48,10 @@ export const LIGHT_SPEED_MAX = 9
 export const SESSION_SLEEP_BYTE = 90
 /** What to restore when the stored record was unreadable (vendor default, 60 s). */
 export const DEFAULT_SLEEP_BYTE = 6
+/** `0xB7` is in units of 10 s; 90 = 15 minutes, the longest "highest performance" hold the vendor UI offers. */
+export const SESSION_PERFORMANCE_TIME = 90
+/** `0xB9`: 0 = low power, 1 = high performance. */
+export const SENSOR_MODE_HIGH = 1
 
 // ---------------------------------------------------------------------------
 // Codecs (pure)
@@ -248,6 +252,31 @@ export class CompxMusic implements MouseMusicService {
         this.idleTimerHeld = undefined
       }
     } else this.idleTimerHeld = true
+    await this.holdAwake()
+  }
+
+  /**
+   * A wireless mouse drops into power saving a few seconds after it stops moving, and then stops servicing writes —
+   * which is why the lights freeze when it is left alone and come back the moment it is touched. The firmware's own
+   * "highest performance" switch (`0xB5` with the hold time in `0xB7`) and the sensor's high-performance mode
+   * (`0xB9`) are what keep it awake; a session holds all three and `restore` puts them back, because they cost
+   * battery and are not ours to change permanently.
+   */
+  private async holdAwake(): Promise<void> {
+    const f = this.host.hid.flash
+    const held: { state?: number; time?: number; sensorMode?: number } = {}
+    const write = async (addr: number, value: number, keep: (previous: number) => void) => {
+      const previous = f[addr] ?? 0xff
+      if (previous === value) return
+      keep(previous)
+      this.flashWrites++
+      // A model without these records simply NAKs; that is not a reason to abandon the session.
+      await this.host.hid.writeValue(addr, value).catch(() => undefined)
+    }
+    await write(Addr.PerformanceTime, SESSION_PERFORMANCE_TIME, (p) => (held.time = p))
+    await write(Addr.PerformanceState, 1, (p) => (held.state = p))
+    await write(Addr.SensorMode, SENSOR_MODE_HIGH, (p) => (held.sensorMode = p))
+    if (held.state !== undefined || held.time !== undefined || held.sensorMode !== undefined) this.awakeHeld = held
   }
 
   /**
@@ -255,6 +284,9 @@ export class CompxMusic implements MouseMusicService {
    * when it sits still, whatever the host writes. `undefined` when it could not be checked.
    */
   idleTimerHeld: boolean | undefined
+
+  /** Power-saving bytes a session is holding, with the values to put back. */
+  private awakeHeld: { state?: number; time?: number; sensorMode?: number } | undefined
 
   /** The user's own sleep/light-off byte while a session is holding the hardware value at the maximum. */
   get heldSleepByte(): number | undefined {
@@ -328,6 +360,15 @@ export class CompxMusic implements MouseMusicService {
       await attempt(async () => {
         await this.host.hid.writeValue(Addr.SleepTime, original)
         this.sleepByteHeld = undefined
+      })
+    }
+    if (this.awakeHeld) {
+      const held = this.awakeHeld
+      await attempt(async () => {
+        if (held.state !== undefined) await this.host.hid.writeValue(Addr.PerformanceState, held.state)
+        if (held.time !== undefined) await this.host.hid.writeValue(Addr.PerformanceTime, held.time)
+        if (held.sensorMode !== undefined) await this.host.hid.writeValue(Addr.SensorMode, held.sensorMode)
+        this.awakeHeld = undefined
       })
     }
     if (failure) throw failure

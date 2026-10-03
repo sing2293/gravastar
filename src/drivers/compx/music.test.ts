@@ -7,6 +7,8 @@ import { Addr } from './eeprom'
 import { complementPair, sumsTo55 } from './frame'
 import { CompxLink } from './link'
 import {
+  SENSOR_MODE_HIGH,
+  SESSION_PERFORMANCE_TIME,
   SESSION_SLEEP_BYTE,
   decodeDongleBar,
   encodeDongleBar,
@@ -61,19 +63,29 @@ describe('CompxMusic.enterLightSession', () => {
     expect((await driver.lighting.get()).offWhileMoving).toBe(true)
 
     const sleepBefore = fw[Addr.SleepTime]
+    const perfBefore = fw[Addr.PerformanceState]
+    const perfTimeBefore = fw[Addr.PerformanceTime]
+    const sensorModeBefore = fw[Addr.SensorMode]
     expect(sleepBefore).toBeLessThan(SESSION_SLEEP_BYTE) // the model ships with a short idle light-off
 
     await driver.music.enterLightSession()
     expect(fw[Addr.MovingOffLight]).toBe(0) // a hand on the mouse no longer blanks the light
     expect(fw[Addr.LightState]).toBe(1)
     expect(fw[Addr.SleepTime]).toBe(SESSION_SLEEP_BYTE) // …and it no longer goes out part-way through a track
-    expect(driver.music.flashWrites).toBe(3)
+    // …and the mouse is held awake, or it stops servicing writes a few seconds after it stops moving.
+    expect(fw[Addr.PerformanceState]).toBe(1)
+    expect(fw[Addr.PerformanceTime]).toBe(SESSION_PERFORMANCE_TIME)
+    expect(fw[Addr.SensorMode]).toBe(SENSOR_MODE_HIGH)
+    expect(driver.music.flashWrites).toBe(6)
 
     await driver.music.setLightEffect({ mode: 3, color: { r: 255, g: 255, b: 255 }, speed: 0, brightness: 9 })
     await driver.music.restore()
     expect(fw[Addr.MovingOffLight]).toBe(1)
     expect(fw[Addr.LightState]).toBe(0)
     expect(fw[Addr.SleepTime]).toBe(sleepBefore)
+    expect(fw[Addr.PerformanceState]).toBe(perfBefore)
+    expect(fw[Addr.PerformanceTime]).toBe(perfTimeBefore)
+    expect(fw[Addr.SensorMode]).toBe(sensorModeBefore)
     await driver.disconnect()
   })
 
@@ -84,9 +96,12 @@ describe('CompxMusic.enterLightSession', () => {
     fw.set(complementPair(0), Addr.MovingOffLight)
     fw.set(complementPair(1), Addr.LightState)
     fw.set(complementPair(SESSION_SLEEP_BYTE), Addr.SleepTime)
-    await driver.hid.readRange(Addr.Light, Addr.MovingOffLight + 2)
+    fw.set(complementPair(1), Addr.PerformanceState)
+    fw.set(complementPair(SESSION_PERFORMANCE_TIME), Addr.PerformanceTime)
+    fw.set(complementPair(SENSOR_MODE_HIGH), Addr.SensorMode)
+    await driver.hid.readRange(Addr.Light, Addr.SensorMode + 2)
     await driver.music.enterLightSession()
-    expect(driver.music.flashWrites).toBe(0)
+    expect(driver.music.flashWrites).toBe(0) // everything already as a session wants it
     await driver.disconnect()
   })
 

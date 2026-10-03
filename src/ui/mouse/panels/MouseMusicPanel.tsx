@@ -82,7 +82,10 @@ export function MouseMusicPanel({ id, caps }: MousePanelProps) {
     <div className="music-stack">
       <Notice kind="info">
         {MOUSE_MEMORY_NOTE}
-        {caps.hasDongle ? ' The receiver’s RGB bar is a live command path and is driven alongside the mouse.' : ''}
+        {caps.hasDongle ? ' The receiver’s RGB bar is a live command path and is driven alongside the mouse.' : ''} A
+        wireless mouse stops servicing writes a few seconds after it stops moving, so a session switches on the
+        firmware’s “highest performance” hold and high-performance sensor mode — it costs battery, and both are put
+        back when you stop.
       </Notice>
       {path === 'strobe' && (
         <Notice>
