@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
+import type { SensorSettings } from '@/model/mouse'
 import { Button, Card, Field, Notice, Select, Toggle } from '@/ui/components/kit'
 import type { MousePanelProps } from '../MousePage'
 
 export function MouseSettingsPanel({ driver, caps, summary }: MousePanelProps) {
   const [sleep, setSleep] = useState<number>()
+  const [power, setPower] = useState<Pick<SensorSettings, 'performanceMode' | 'performanceSeconds' | 'sensorMode'>>()
+  const [powerSupported, setPowerSupported] = useState(false)
   const [profile, setProfile] = useState<{ current: number; supported: boolean }>()
   const [longRange, setLongRange] = useState<{ supported: boolean; enabled: boolean }>()
   const [pairing, setPairing] = useState<string>()
@@ -16,6 +19,9 @@ export function MouseSettingsPanel({ driver, caps, summary }: MousePanelProps) {
   const load = async () => {
     try {
       setSleep(await driver.power.getSleepSeconds())
+      const [sensor, sensorCaps] = await Promise.all([driver.sensor.get(), driver.sensor.capabilities()])
+      setPower({ performanceMode: sensor.performanceMode, performanceSeconds: sensor.performanceSeconds, sensorMode: sensor.sensorMode })
+      setPowerSupported(sensorCaps.supports.performanceMode || sensorCaps.supports.sensorMode)
       setProfile(await driver.profiles.get())
       if (driver.dongle) setLongRange(await driver.dongle.longRange())
     } catch (e) {
@@ -63,11 +69,63 @@ export function MouseSettingsPanel({ driver, caps, summary }: MousePanelProps) {
       {error && <Notice kind="error">{error}</Notice>}
       {notice && <Notice kind="info">{notice}</Notice>}
       <div className="grid cols-2">
-        <Card title="Power">
+        <Card title="Power saving">
           <div className="stack">
-            <Field label="Sleep / light-off after" hint="Also turns the light bar off when idle.">
+            <div className="dim" style={{ fontSize: 12 }}>
+              Left alone, the mouse dozes off after a few seconds: its light goes out and it stops accepting changes
+              until you move it again. These three settings are what decide that. Music sync holds them open while it
+              runs and puts them back afterwards — turn them off here to keep the mouse awake all the time.
+            </div>
+            <div className="row">
+              <Button
+                variant="primary"
+                disabled={busy || !powerSupported}
+                onClick={() =>
+                  void run(async () => {
+                    await driver.power.setSleepSeconds(900)
+                    await driver.sensor.update('performanceSeconds', 900)
+                    await driver.sensor.update('performanceMode', true)
+                    await driver.sensor.update('sensorMode', 'highPerformance')
+                  }, 'Power saving turned off — the mouse stays awake for 15 minutes at a time. It will use more battery.')
+                }
+              >
+                Turn power saving off
+              </Button>
+              <Button
+                disabled={busy || !powerSupported}
+                onClick={() =>
+                  void run(async () => {
+                    await driver.power.setSleepSeconds(60)
+                    await driver.sensor.update('performanceMode', false)
+                    await driver.sensor.update('sensorMode', 'lowPower')
+                  }, 'Battery-saving defaults restored.')
+                }
+              >
+                Back to battery saving
+              </Button>
+            </div>
+            <Field label="Sleep / light-off after" hint="Also turns the light bar off once the mouse has been still this long.">
               <Select value={sleep ?? 10} options={driver.power.options().map((s) => ({ value: s, label: s < 60 ? `${s} s` : `${s / 60} min` }))} onChange={(v) => void run(() => driver.power.setSleepSeconds(v))} disabled={busy || sleep === undefined} />
             </Field>
+            {power && (
+              <>
+                <Toggle checked={power.performanceMode} onChange={(v) => void run(() => driver.sensor.update('performanceMode', v))} disabled={busy} label="Highest performance (keeps the mouse fully awake)" />
+                <Field label="Highest performance for">
+                  <Select value={power.performanceSeconds} options={driver.power.options().map((s) => ({ value: s, label: s < 60 ? `${s} s` : `${s / 60} min` }))} onChange={(v) => void run(() => driver.sensor.update('performanceSeconds', v))} disabled={busy || !power.performanceMode} />
+                </Field>
+                <Field label="Sensor mode" hint="Low power saves battery; high performance keeps latency down and the mouse responsive.">
+                  <Select
+                    value={power.sensorMode === 'corded' ? 'highPerformance' : power.sensorMode}
+                    options={[
+                      { value: 'lowPower', label: 'Low power' },
+                      { value: 'highPerformance', label: 'High performance' },
+                    ]}
+                    onChange={(v) => void run(() => driver.sensor.update('sensorMode', v))}
+                    disabled={busy || power.sensorMode === 'corded'}
+                  />
+                </Field>
+              </>
+            )}
             {driver.dongle && longRange?.supported && (
               <Toggle checked={longRange.enabled} onChange={(v) => void run(() => driver.dongle!.setLongRange(v))} disabled={busy} label="Long-range mode (receiver)" />
             )}
