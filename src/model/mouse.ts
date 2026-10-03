@@ -254,8 +254,15 @@ export interface MouseMusicService {
    */
   enterLightSession(): Promise<void>
   /**
+   * Re-asserts the light's on byte. The firmware blanks the bar after its idle timeout, which stops a running
+   * animation dead; callers re-assert every so often as insurance.
+   */
+  setLightOn(): Promise<void>
+  /**
    * Light-bar block write in settings memory (mode included, so the firmware's own breathing can be used instead of
-   * driving every frame from the host). Callers MUST rate-limit and budget these writes.
+   * driving every frame from the host). Every call is an erase cycle: callers decide the rate. The shipped sink
+   * paces pulse mode hard and lets strobe write on every beat with no cap, which is a deliberate choice — these
+   * mice publish no endurance figure, and the UI shows a running write count instead of enforcing a limit.
    */
   setLightEffect(effect: MouseLightEffect): Promise<void>
   /** `setLightEffect` with the stored speed and the fixed-colour mode. */

@@ -47,6 +47,10 @@ class StubMusic implements MouseMusicService {
   async enterLightSession(): Promise<void> {
     this.calls.push('enterLightSession')
   }
+  setLightOn(): Promise<void> {
+    this.calls.push('setLightOn')
+    return this.write()
+  }
   async restore(): Promise<void> {
     this.calls.push('restore')
   }
@@ -99,6 +103,7 @@ function frame(
     audio: { time, level: 0.5, bands: RAMP, bass: 0.5, mid: 0.5, treble: 0.5, beat: false, beatStrength: 0, ...audio },
     t: time / 1000,
     preset: 'spectrum',
+    beatSensitivity: 1,
     color: { r: 255, g: 0, b: 0 },
     sensitivity: 1,
     accent: ACCENT,
@@ -523,7 +528,7 @@ describe('MouseSink strobe mode', () => {
     expect(music.calls).toContain('restore') // the test owns the snapshot, so it is put back
   })
 
-  it('is never chosen automatically and stops at the write budget', async () => {
+  it('is never chosen automatically, and only stops when a write budget is set', async () => {
     expect(strategyOrder({ amplitudeStream: false, dongleBar: false, flashLight: true })).toEqual(['pulse', 'gentle'])
     const music = new StubMusic({ flashLight: true })
     const sink = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'strobe', strobeFps: 100, writeBudget: 5 })
@@ -534,6 +539,158 @@ describe('MouseSink strobe mode', () => {
     }
     expect(music.effects).toHaveLength(5)
     expect(sink.status()).toMatchObject({ memoryWrites: 5, note: BUDGET_NOTE })
+  })
+})
+
+describe('MouseSink reaction source', () => {
+  const band = (bass: number, mid: number, treble: number) => ({ bass, mid, treble, beat: false, beatStrength: 0 })
+
+  it('flashes on a treble onset while ignoring the bass line, and the other way round', async () => {
+    const treble = new StubMusic({ flashLight: true })
+    const trebleSink = new MouseSink('m', 'Mouse', driverWith(treble), { prefer: 'strobe', reactTo: 'treble' })
+    await trebleSink.prepare()
+    const bass = new StubMusic({ flashLight: true })
+    const bassSink = new MouseSink('m', 'Mouse', driverWith(bass), { prefer: 'strobe', reactTo: 'bass' })
+    await bassSink.prepare()
+
+    // A steady bass line with hi-hats on top: only the treble moves.
+    for (let i = 0; i < 80; i++) {
+      const f = frame(i * 25, band(0.6, 0.2, i % 8 === 0 ? 0.8 : 0.05))
+      trebleSink.push(f)
+      bassSink.push(f)
+      await flush()
+    }
+    const lit = (m: StubMusic) => m.effects.filter((e) => e.brightness === 9).length
+    expect(lit(treble)).toBeGreaterThanOrEqual(5)
+    expect(lit(bass)).toBe(0) // the bass never attacks, so nothing fires
+
+    // Now a kick pattern with steady highs: the roles swap.
+    const kick = new StubMusic({ flashLight: true })
+    const kickSink = new MouseSink('m', 'Mouse', driverWith(kick), { prefer: 'strobe', reactTo: 'bass' })
+    await kickSink.prepare()
+    for (let i = 0; i < 80; i++) {
+      kickSink.push(frame(i * 25, band(i % 8 === 0 ? 0.9 : 0.1, 0.2, 0.5)))
+      await flush()
+    }
+    expect(kick.effects.filter((e) => e.brightness === 9).length).toBeGreaterThanOrEqual(5)
+  })
+
+  it('switching bands starts detection over instead of going dead', async () => {
+    const music = new StubMusic({ flashLight: true })
+    const sink = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'strobe', reactTo: 'bass' })
+    await sink.prepare()
+    // Loud bass hits teach the bass detector a high peak…
+    for (let i = 0; i < 60; i++) {
+      sink.push(frame(i * 25, band(i % 8 === 0 ? 1 : 0.1, 0.1, 0.05)))
+      await flush()
+    }
+    const bassFlashes = music.effects.filter((e) => e.brightness === 9).length
+    expect(bassFlashes).toBeGreaterThan(2)
+
+    // …switching to the much quieter treble must not inherit that peak, or nothing would fire for seconds.
+    sink.options = { ...sink.options, reactTo: 'treble' }
+    const before = music.effects.length
+    for (let i = 60; i < 120; i++) {
+      sink.push(frame(i * 25, band(0.1, 0.1, i % 8 === 0 ? 0.08 : 0.01)))
+      await flush()
+    }
+    expect(music.effects.filter((e) => e.brightness === 9).length).toBeGreaterThan(bassFlashes)
+    expect(music.effects.length).toBeGreaterThan(before)
+  })
+
+  it('a band also drives the pulse brightness', async () => {
+    const music = new StubMusic({ flashLight: true })
+    const sink = new MouseSink('m', 'Mouse', driverWith(music), {
+      prefer: 'pulse',
+      reactTo: 'bass',
+      pulseMinIntervalMs: 0,
+    })
+    await sink.prepare()
+    // Loud bass, silent elsewhere: brightness follows the bass even though `intensity` stays low.
+    for (let i = 0; i < 40; i++) {
+      sink.push(frame(i * 25, band(0.9, 0, 0), { intensity: 0.05 }))
+      await flush()
+    }
+    expect(music.effects[music.effects.length - 1]!.brightness).toBe(9)
+  })
+
+  it('writes on every beat when no budget is set', async () => {
+    const music = new StubMusic({ flashLight: true })
+    const sink = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'strobe' })
+    await sink.prepare()
+    expect(sink.options.writeBudget).toBe(Number.POSITIVE_INFINITY)
+    // 150 beats at 200 BPM, faster than strobeFps would allow: every one still gets its flash.
+    for (let i = 0; i < 150; i++) {
+      sink.push(frame(i * 300, { beat: true, beatStrength: 1 }))
+      await flush()
+      sink.push(frame(i * 300 + 150)) // the dark frame between beats
+      await flush()
+    }
+    expect(music.effects.filter((e) => e.brightness === 9).length).toBe(150)
+    expect(sink.status().note).toBeUndefined() // never paused
+  })
+})
+
+describe('MouseSink when the mouse cannot keep up', () => {
+  it('backs off on write timeouts instead of hammering, and recovers', async () => {
+    class SlowMouse extends StubMusic {
+      timeout = false
+      setLightEffect(effect: MouseLightEffect): Promise<void> {
+        this.calls.push('setLightEffect')
+        this.effects.push(effect)
+        return this.timeout ? Promise.reject(new Error('mouse command 0x7 timed out after 200ms')) : Promise.resolve()
+      }
+    }
+    const music = new SlowMouse({ flashLight: true })
+    const sink = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'strobe', strobeFps: 20 })
+    await sink.prepare()
+    music.timeout = true
+    // A beat every 200 ms with quiet frames between, so each blink is a lit write and a dark one.
+    for (let i = 0; i < 80; i++) {
+      sink.push(frame(i * 50, { beat: i % 4 === 0, beatStrength: 1 }))
+      await flush()
+    }
+    const during = music.effects.length
+    expect(during).toBeLessThan(20) // not one write per beat while the device is failing
+    expect(sink.status().note).toMatch(/not keeping up/)
+    expect(sink.status().error).toBeUndefined() // a timeout is a pacing signal, not a session-breaking error
+    expect(sink.status().active).toBe(true)
+
+    // Once it answers again the sink keeps going rather than staying throttled forever.
+    music.timeout = false
+    for (let i = 80; i < 400; i++) {
+      sink.push(frame(i * 50, { beat: i % 4 === 0, beatStrength: 1 }))
+      await flush()
+    }
+    expect(music.effects.length).toBeGreaterThan(during + 5)
+  })
+})
+
+describe('MouseSink keeping the light awake', () => {
+  it('re-asserts the light periodically so the firmware idle timer cannot kill the session', async () => {
+    const music = new StubMusic({ flashLight: true })
+    const sink = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'pulse', keepAwakeMs: 1000 })
+    await sink.prepare()
+    await sweep(sink, 0, 900, 100)
+    expect(music.calls.filter((c) => c === 'setLightOn')).toHaveLength(0) // not in the first interval
+    await sweep(sink, 1000, 4000, 100)
+    const wakes = music.calls.filter((c) => c === 'setLightOn').length
+    expect(wakes).toBeGreaterThanOrEqual(2)
+    expect(wakes).toBeLessThanOrEqual(4)
+  })
+
+  it('does not wake anything in receiver-bar mode or when disabled', async () => {
+    const bar = new StubMusic({ dongleBar: true })
+    const barSink = new MouseSink('m', 'Mouse', driverWith(bar), { prefer: 'dongle', keepAwakeMs: 500 })
+    await barSink.prepare()
+    await sweep(barSink, 0, 3000, 100)
+    expect(bar.calls).not.toContain('setLightOn')
+
+    const off = new StubMusic({ flashLight: true })
+    const offSink = new MouseSink('m', 'Mouse', driverWith(off), { prefer: 'pulse', keepAwakeMs: 0 })
+    await offSink.prepare()
+    await sweep(offSink, 0, 3000, 100)
+    expect(off.calls).not.toContain('setLightOn')
   })
 })
 

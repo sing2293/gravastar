@@ -608,11 +608,18 @@ class PowerSvc implements MousePowerService {
   constructor(private readonly d: CompxMouseDriver) {}
 
   async getSleepSeconds(): Promise<number> {
-    return this.d.flash[Addr.SleepTime]! * 10
+    // A music session parks the hardware byte at its maximum so the light does not idle out; report the user's own
+    // value meanwhile, or the panel would show "15 min" and writing it back would be a no-op.
+    return (this.d.music.heldSleepByte ?? this.d.flash[Addr.SleepTime]!) * 10
   }
 
   async setSleepSeconds(seconds: number): Promise<void> {
-    await this.d.hid.writeValue(Addr.SleepTime, Math.max(1, Math.round(seconds / 10)))
+    const value = Math.max(1, Math.round(seconds / 10))
+    if (this.d.music.heldSleepByte !== undefined) {
+      this.d.music.setHeldSleepByte(value) // applied when the session releases the byte
+      return
+    }
+    await this.d.hid.writeValue(Addr.SleepTime, value)
   }
 
   options(): number[] {

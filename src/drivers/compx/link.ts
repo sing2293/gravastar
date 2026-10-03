@@ -19,6 +19,19 @@ export interface CompxLinkOptions {
 
 export const DEFAULT_COMPX_LINK: CompxLinkOptions = { timeoutMs: 200, attempts: 5 }
 
+/** Per-request override of the link defaults. */
+export interface RequestOptions {
+  timeoutMs?: number
+  attempts?: number
+}
+
+/**
+ * Profile for real-time writes (music sync): wait a little longer for the echo — a busy flash can take its time —
+ * but never retry. The vendor's 5 × 200 ms would hold the serial queue for a full second, during which nothing
+ * else reaches the mouse and the animation stops dead.
+ */
+export const STREAM_REQUEST: RequestOptions = { timeoutMs: 350, attempts: 1 }
+
 export type StatusListener = (frame: Uint8Array) => void
 
 export class CompxLink {
@@ -43,17 +56,19 @@ export class CompxLink {
   }
 
   /** Sends a frame and resolves with the device's echo (status byte 1 = OK, 1 = error/unsupported). */
-  request(frame: Uint8Array): Promise<ParsedFrame> {
+  request(frame: Uint8Array, opts: RequestOptions = {}): Promise<ParsedFrame> {
+    const attempts = opts.attempts ?? this.options.attempts
+    const timeoutMs = opts.timeoutMs ?? this.options.timeoutMs
     return this.queue.run(async () => {
       let lastError: unknown
-      for (let attempt = 1; attempt <= this.options.attempts; attempt++) {
+      for (let attempt = 1; attempt <= attempts; attempt++) {
         const reply = deferred<Uint8Array>()
         const unsub = this.transport.onInputReport((r) => {
           if (r.reportId === REPORT_ID && r.data[0] !== Command.StatusChanged && echoMatches(frame, r.data)) reply.resolve(r.data)
         })
         try {
           await this.transport.send(frame)
-          return parseFrame(await withTimeout(reply.promise, this.options.timeoutMs, `mouse command 0x${frame[0]!.toString(16)}`))
+          return parseFrame(await withTimeout(reply.promise, timeoutMs, `mouse command 0x${frame[0]!.toString(16)}`))
         } catch (error) {
           lastError = error
           if (!(error instanceof TimeoutError)) throw error
@@ -65,8 +80,8 @@ export class CompxLink {
     })
   }
 
-  command(command: number, payload: number[] = []): Promise<ParsedFrame> {
-    return this.request(buildFrame({ command, payload }))
+  command(command: number, payload: number[] = [], opts?: RequestOptions): Promise<ParsedFrame> {
+    return this.request(buildFrame({ command, payload }), opts)
   }
 
   /** Fire-and-forget (used for factory reset and OLED streaming by the vendor). */
@@ -94,19 +109,19 @@ export class CompxLink {
   }
 
   /** `WriteFlashData` of one value with its 0x55 complement. */
-  async writeValue(addr: number, value: number): Promise<void> {
+  async writeValue(addr: number, value: number, opts?: RequestOptions): Promise<void> {
     const pair = complementPair(value)
-    const reply = await this.request(buildFrame({ command: Command.WriteFlashData, address: addr, payload: pair }))
+    const reply = await this.request(buildFrame({ command: Command.WriteFlashData, address: addr, payload: pair }), opts)
     if (reply.status !== 0) throw new Error(`flash write at 0x${addr.toString(16)} rejected`)
     this.flash.set(pair, addr)
   }
 
   /** `WriteFlashData` of an arbitrary record in 10-byte chunks. */
-  async writeArray(addr: number, bytes: ArrayLike<number>): Promise<void> {
+  async writeArray(addr: number, bytes: ArrayLike<number>, opts?: RequestOptions): Promise<void> {
     const data = Uint8Array.from(bytes)
     for (let i = 0; i < data.length; i += PAYLOAD_MAX) {
       const chunk = data.subarray(i, i + PAYLOAD_MAX)
-      const reply = await this.request(buildFrame({ command: Command.WriteFlashData, address: addr + i, payload: Array.from(chunk) }))
+      const reply = await this.request(buildFrame({ command: Command.WriteFlashData, address: addr + i, payload: Array.from(chunk) }), opts)
       if (reply.status !== 0) throw new Error(`flash write at 0x${(addr + i).toString(16)} rejected`)
       this.flash.set(chunk, addr + i)
     }

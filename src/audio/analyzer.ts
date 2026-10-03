@@ -23,6 +23,7 @@ export class FeatureExtractor {
   private readonly edges: number[]
   private readonly bandBuf: Float32Array
   private readonly prevBands: Float32Array
+  private hasPrevBands = false
   private readonly fluxHistory: number[] = []
   private fluxPeak = 1e-4
   private lastBeat = -Infinity
@@ -89,7 +90,12 @@ export class FeatureExtractor {
       if (rise > 0) flux += rise * (i < bands.length / 3 ? 1.5 : 1)
     }
     flux /= bands.length
+    // The first frame rises from an all-zero buffer: that is the spectrum itself, not an onset. Counting it would
+    // poison both the running statistics and the peak for seconds, swallowing the beats at the start of a session.
+    const warmingUp = !this.hasPrevBands
     this.prevBands.set(bands)
+    this.hasPrevBands = true
+    if (warmingUp) flux = 0
     const hist = this.fluxHistory
     let mean = 0
     for (const f of hist) mean += f
@@ -104,7 +110,10 @@ export class FeatureExtractor {
     const floor = this.fluxPeak * (0.12 / k)
     let beat = false
     let beatStrength = 0
-    if (hist.length >= 8 && flux > Math.max(threshold, floor) && now - this.lastBeat > this.options.minBeatIntervalMs) {
+    // Below this the input is silence or room tone: with only relative tests, its noise floor would otherwise
+    // register as a steady stream of onsets. ~ −42 dBFS, far under any music anyone is actually listening to.
+    const audible = rms > 0.008
+    if (audible && hist.length >= 8 && flux > Math.max(threshold, floor) && now - this.lastBeat > this.options.minBeatIntervalMs) {
       beat = true
       beatStrength = Math.min(1, (flux - threshold) / Math.max(threshold, this.fluxPeak * 0.25))
       this.lastBeat = now

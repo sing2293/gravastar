@@ -79,6 +79,7 @@ export class MusicSyncEngine {
   private status: MusicSyncStatus
   private readonly tempoTracker = new TempoTracker()
   private beats = 0
+  private beatsPublished = 0
   private randomHue = Math.random()
   private randomColor: RGB = { r: 255, g: 0, b: 0 }
   private readonly listeners = new Set<StatusListener>()
@@ -187,6 +188,7 @@ export class MusicSyncEngine {
     this.fpsWindow = now
     this.frames = 0
     this.beats = 0
+    this.beatsPublished = 0
     this.tempoTracker.reset()
     this.setStatus({ running: true, source: kind, fps: 0, beats: 0, bpm: undefined, clock: opened.clock?.kind ?? 'frame' })
     await Promise.all([...this.sinks.values()].filter((e) => e.enabled).map((e) => this.prepareSink(e.sink)))
@@ -209,7 +211,9 @@ export class MusicSyncEngine {
     this.source = undefined
     if (wasRunning) await Promise.all([...this.sinks.values()].map((e) => e.sink.release().catch(() => undefined)))
     this.lastFrame = undefined
-    this.setStatus({ running: false, source: undefined, fps: 0, clock: undefined, ...(reason ? { error: reason } : {}) })
+    this.beats = 0
+    this.tempoTracker.reset()
+    this.setStatus({ running: false, source: undefined, fps: 0, beats: 0, bpm: undefined, clock: undefined, ...(reason ? { error: reason } : {}) })
   }
 
   /** Runs one analysis step and pushes to every enabled sink (public for tests). */
@@ -221,8 +225,12 @@ export class MusicSyncEngine {
     if (audio.beat) {
       this.beats++
       this.tempoTracker.beat(now)
-      // Published per beat, not once a second: this counter is how a user checks that onsets are being found.
-      this.setStatus({ beats: this.beats, bpm: this.tempoTracker.tempo.bpm })
+      // Published often enough to read as live, but not on every onset: `step` runs on the audio thread, and a
+      // React render per beat there risks stalling it (and with it the whole animation).
+      if (now - this.beatsPublished >= 200) {
+        this.beatsPublished = now
+        this.setStatus({ beats: this.beats, bpm: this.tempoTracker.tempo.bpm })
+      }
       // A new colour per beat; the sinks' own rate limits decide how often the device actually follows it.
       if (this.options.randomColor) {
         const next = nextRandomColor(this.randomHue)
@@ -239,6 +247,7 @@ export class MusicSyncEngine {
       preset: this.preset.id,
       color,
       sensitivity: this.options.sensitivity,
+      beatSensitivity: this.options.beatSensitivity,
       accent: this.options.randomColor ? color : accent.color,
       intensity: accent.intensity,
     }

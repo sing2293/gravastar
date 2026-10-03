@@ -104,7 +104,17 @@ is JSON of these types; vendor profile files are converted at the edge.
   the mouse and the UI says so. The receiver's RGB bar (`0x18`) costs no memory, so when the receiver has one it is
   driven *alongside* the body light, and a receiver that stops answering is dropped without taking the mouse down.
   Whether GravaStar mice accept `0xB2/0xB6` is UNVERIFIED; the probe is harmless (a zero frame) and the UI reports
-  which path is active. Before any body-light strategy runs, `enterLightSession` switches the light on and clears
+  which path is active. `reactTo` picks what the mouse follows — the mix's own onset, or a single band's through
+  `audio/onset.ts` (`bass`, `mid`, `treble`), which then also drives its brightness.
+
+  **Pacing is the whole game here.** Live writes use `STREAM_REQUEST` (350 ms, *one* attempt): the vendor's 5 × 200 ms
+  retry holds the serial queue for a full second, and on hardware that showed up as `0x07` timeouts with the lighting
+  freezing behind them. The sink measures each write's round-trip, refuses to issue another inside 1.3 × that, and
+  multiplies every gate by a backoff that grows on timeouts and decays on success — a mouse that cannot keep up is
+  given room instead of being hammered. `enterLightSession` also parks the sleep / light-off byte (`0xAD`) at its
+  maximum for the session, because its stock 10–60 s idle timer otherwise blanks the bar part-way through a track;
+  the light's on byte is re-asserted every `keepAwakeMs` as well, and the power service reports the user's own sleep
+  value while the session holds the hardware one. Before any body-light strategy runs, `enterLightSession` switches the light on and clears
   the firmware's **"light off while moving"** byte (`0xB3`) — left set, it blanks the light exactly while a hand is
   on the mouse, which makes any animation look dead; `restore` puts both back. Changing the path mid-session calls
   `MusicSyncEngine.refreshSink`, and the panel's **flash test** blinks the mouse with no audio at all, separating

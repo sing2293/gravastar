@@ -51,7 +51,9 @@ export function DevicesCard({ focusId, only }: { focusId?: string; only?: boolea
 export function SinkRow({ sink, focus, running }: { sink: SinkStatus; focus: boolean; running: boolean }) {
   const impl = musicEngine.getSink(sink.id)
   // Settings-memory writes are the ones that wear the mouse out; the budget is what the sink pauses at.
-  const budget = impl instanceof MouseSink && sink.memoryWrites !== undefined ? impl.options.writeBudget : undefined
+  const rawBudget = impl instanceof MouseSink && sink.memoryWrites !== undefined ? impl.options.writeBudget : undefined
+  const budget = rawBudget !== undefined && Number.isFinite(rawBudget) ? rawBudget : undefined
+  const showsMemory = rawBudget !== undefined
   const tempo = impl instanceof MouseSink ? impl.tempoEstimate : undefined
   return (
     <div className={['sink-row', focus ? 'focus' : ''].join(' ')}>
@@ -67,9 +69,10 @@ export function SinkRow({ sink, focus, running }: { sink: SinkStatus; focus: boo
       </div>
       <div className="stats">
         <span title="Device writes per second">{sink.fps} fps</span>
-        {budget !== undefined ? (
-          <span title="Settings-memory writes this session, and the budget the sink pauses at">
-            {sink.memoryWrites} / {budget} memory writes
+        {showsMemory ? (
+          <span title="Settings-memory writes this session">
+            {sink.memoryWrites}
+            {budget !== undefined ? ` / ${budget}` : ''} memory writes
           </span>
         ) : (
           <span title="Writes this session">{sink.writes} writes</span>

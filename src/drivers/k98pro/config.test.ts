@@ -98,3 +98,21 @@ describe('helpers', () => {
     expect(bitmapToIndices(Uint8Array.from([0b00000101, 0b10000000]))).toEqual([0, 2, 15])
   })
 })
+
+describe('feature-bitmap caching', () => {
+  it('reads once and reuses it, but never remembers a failure', async () => {
+    const { config, fake } = await setup()
+    const reads = () => fake.sent.filter((p) => p.data[0] === 0x82 && p.data[1] === 0x0f).length
+    await config.features()
+    await config.features()
+    expect(reads()).toBe(1) // streaming consults this per frame: one round-trip, not thousands
+
+    // A device that does not answer must not poison the cache for the rest of the session.
+    const broken = await setup()
+    let answer = false
+    broken.fw.extensions.push((p) => (p.commandId === 0x82 && p.param === 0x0f && !answer ? [] : undefined))
+    await expect(broken.config.features()).rejects.toThrow()
+    answer = true
+    await expect(broken.config.features()).resolves.toBeTruthy()
+  })
+})

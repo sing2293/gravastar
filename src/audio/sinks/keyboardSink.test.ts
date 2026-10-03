@@ -29,6 +29,7 @@ function frame(time: number, preset = 'pulse'): MusicFrame {
     },
     t: time / 1000,
     preset,
+    beatSensitivity: 1,
     color: { r: 155, g: 255, b: 49 },
     sensitivity: 1,
     accent: { r: 155, g: 255, b: 49 },

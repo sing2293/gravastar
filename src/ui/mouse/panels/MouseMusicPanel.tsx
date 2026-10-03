@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { musicEngine } from '@/audio/musicSync'
-import { MouseSink, type MouseSinkOptions } from '@/audio/sinks/mouseSink'
+import { MouseSink, type MouseReaction, type MouseSinkOptions } from '@/audio/sinks/mouseSink'
 import { Button, Field, Notice, Select, Slider } from '@/ui/components/kit'
 import { DevicesCard, LiveCard, LookCard, MOUSE_MEMORY_NOTE, SourceCard, useMusicStatus, useMusicUi } from '@/ui/music'
 import type { MousePanelProps } from '../MousePage'
@@ -15,6 +15,13 @@ const PATHS: { value: Path; label: string }[] = [
   { value: 'gentle', label: 'Gentle — colour change on strong beats only' },
   { value: 'amplitude', label: 'Amplitude streaming (0xB6) — if the firmware accepts it' },
   { value: 'dongle', label: 'Receiver RGB bar only (0x18) — 2.4 GHz receiver' },
+]
+
+const REACTIONS: { value: MouseReaction; label: string }[] = [
+  { value: 'beat', label: 'The beat of the whole mix' },
+  { value: 'bass', label: 'Bass — kick drum and bass line' },
+  { value: 'mid', label: 'Mids — vocals, guitars, snare' },
+  { value: 'treble', label: 'Treble — hi-hats, cymbals, detail' },
 ]
 
 const HINTS: Partial<Record<Path, string>> = {
@@ -33,6 +40,7 @@ export function MouseMusicPanel({ id, caps }: MousePanelProps) {
   const sink = impl instanceof MouseSink ? impl : undefined
   const [path, setPath] = useState<Path>(sink?.options.prefer ?? 'auto')
   const [speedOffset, setSpeedOffset] = useState(sink?.options.pulseSpeedOffset ?? 0)
+  const [reactTo, setReactTo] = useState<MouseReaction>(sink?.options.reactTo ?? 'beat')
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<string>()
   // The store registers the sink asynchronously; pick up its options once it exists.
@@ -40,6 +48,7 @@ export function MouseMusicPanel({ id, caps }: MousePanelProps) {
     if (!sink) return
     setPath(sink.options.prefer ?? 'auto')
     setSpeedOffset(sink.options.pulseSpeedOffset)
+    setReactTo(sink.options.reactTo)
   }, [sink])
   const mine = status.sinks.find((s) => s.id === id)
   const pulsing = mine?.mode === 'pulse (firmware breathing)'
@@ -77,9 +86,9 @@ export function MouseMusicPanel({ id, caps }: MousePanelProps) {
       </Notice>
       {path === 'strobe' && (
         <Notice>
-          Strobe writes the mouse’s settings memory twice per beat — about 240 writes a minute at 120 BPM. Flash
-          endurance is not published for these mice, so use it for a track or two rather than a whole evening; the
-          session pauses at the write budget.
+          Strobe writes the mouse’s settings memory twice per beat — about 240 writes a minute at 120 BPM. These mice
+          do not publish a flash endurance figure, so the write counter below is there to keep an eye on; nothing is
+          capped.
         </Notice>
       )}
       {testResult && <Notice kind="info">{testResult}</Notice>}
@@ -93,6 +102,17 @@ export function MouseMusicPanel({ id, caps }: MousePanelProps) {
             hint={HINTS[path] ?? 'Tried first; a path the mouse does not support falls back to the automatic order.'}
           >
             <Select value={path} options={PATHS} disabled={!sink} onChange={choosePath} />
+          </Field>
+          <Field label="React to" hint="Which part of the music drives the mouse. A single band also sets its brightness, so the mouse follows just that part.">
+            <Select
+              value={reactTo}
+              options={REACTIONS}
+              disabled={!sink}
+              onChange={(v) => {
+                setReactTo(v)
+                if (sink) sink.options = { ...sink.options, reactTo: v }
+              }}
+            />
           </Field>
           <Field
             label="Is the light reacting?"

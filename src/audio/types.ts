@@ -40,6 +40,8 @@ export interface MusicFrame {
   preset: string
   color: RGB
   sensitivity: number
+  /** The onset-sensitivity knob, for sinks that run their own per-band detector. */
+  beatSensitivity: number
   /** Single accent colour + intensity for devices with one light (mouse bar, receiver). */
   accent: RGB
   intensity: number

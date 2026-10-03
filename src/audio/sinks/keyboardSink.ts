@@ -4,9 +4,16 @@ import { presetById } from '../presets'
 import type { LightingFrame, LightingSink, MusicFrame, SinkStatus } from '../types'
 
 export interface KeyboardSinkOptions {
-  /** Device writes per second, upper bound. */
+  /** Device writes per second, upper bound. The achieved rate is also capped by how fast the keyboard replies. */
   maxFps: number
 }
+
+/**
+ * Share of the time the device link may spend writing colours. Keeping it below 1 leaves room for everything else
+ * on the same HID queue (battery polls, key-travel bubbles) — without it a slow link queues frames faster than it
+ * drains them and the lighting lurches instead of flowing.
+ */
+const DUTY_CYCLE = 0.8
 
 /** Streams per-key colours to a K98 Pro-class keyboard through its real-time RGB command. */
 export class KeyboardSink implements LightingSink {
@@ -14,9 +21,11 @@ export class KeyboardSink implements LightingSink {
   private previous: ZoneLighting | undefined
   private lastSend = 0
   private sending = false
+  /** Rolling average of how long one frame takes on the wire, ms. */
+  private sendMs = 0
   private writes = 0
   private fps = 0
-  private windowStart = 0
+  private windowStart: number | undefined
   private windowCount = 0
   private active = false
   private error: string | undefined
@@ -46,8 +55,15 @@ export class KeyboardSink implements LightingSink {
     this.error = undefined
     this.writes = 0
     this.fps = 0
-    this.windowStart = performance.now()
+    this.sendMs = 0
+    this.windowStart = undefined
     this.windowCount = 0
+  }
+
+  /** Writes per second this keyboard can actually take, from the measured round-trip. */
+  private get pace(): number {
+    const ceiling = this.sendMs > 0 ? (1000 / this.sendMs) * DUTY_CYCLE : this.options.maxFps
+    return Math.max(2, Math.min(this.options.maxFps, ceiling))
   }
 
   /**
@@ -96,18 +112,22 @@ export class KeyboardSink implements LightingSink {
   push(frame: MusicFrame): void {
     if (!this.active || this.sending) return
     const now = frame.audio.time
-    if (now - this.lastSend < 1000 / this.options.maxFps) return
+    if (now - this.lastSend < 1000 / this.pace) return
     const preset = presetById(frame.preset)
     const lighting = preset.render(frame.audio, { layout: this.layout, t: frame.t, color: frame.color, sensitivity: frame.sensitivity })
     this.lastLighting = lighting
     this.lastSend = now
     this.sending = true
+    const startedAt = performance.now()
     const send = 'all' in lighting ? this.driver.lighting.streamAll(lighting.all) : this.sendKeys(lighting.keys)
     send
       .then(() => {
+        const took = performance.now() - startedAt
+        this.sendMs = this.sendMs ? this.sendMs * 0.8 + took * 0.2 : took
         this.writes++
         this.windowCount++
-        if (now - this.windowStart >= 1000) {
+        if (this.windowStart === undefined) this.windowStart = now
+        else if (now - this.windowStart >= 1000) {
           this.fps = Math.round((this.windowCount * 1000) / (now - this.windowStart))
           this.windowStart = now
           this.windowCount = 0
@@ -135,6 +155,7 @@ export class KeyboardSink implements LightingSink {
   }
 
   status(): Omit<SinkStatus, 'enabled'> {
-    return { id: this.id, label: this.label, kind: this.kind, active: this.active, fps: this.fps, writes: this.writes, mode: this.mode, note: this.note, error: this.error }
+    const pacing = this.sendMs > 0 ? ` · ${Math.round(this.sendMs)} ms/frame, up to ${Math.round(this.pace)} fps` : ''
+    return { id: this.id, label: this.label, kind: this.kind, active: this.active, fps: this.fps, writes: this.writes, mode: this.mode, note: this.note ? this.note + pacing : pacing.slice(3) || undefined, error: this.error }
   }
 }

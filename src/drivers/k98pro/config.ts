@@ -124,7 +124,22 @@ export class K98Config implements SettingsService {
     return (await this.info(Info.WirelessDedicatedSupported, [], 1))[0] === 1
   }
 
-  async features(): Promise<KeyboardFeatures> {
+  /**
+   * The feature bitmap never changes while the device is open, and real-time colour streaming consults it on every
+   * frame — so it is read once and the promise reused. Without this, each streamed frame costs an extra
+   * request/response round-trip and the lighting visibly stutters.
+   */
+  features(): Promise<KeyboardFeatures> {
+    // A failed read must not be remembered: one timeout would otherwise break lighting until the device reopens.
+    return (this.featuresPromise ??= this.readFeatures().catch((error: unknown) => {
+      this.featuresPromise = undefined
+      throw error
+    }))
+  }
+
+  private featuresPromise: Promise<KeyboardFeatures> | undefined
+
+  private async readFeatures(): Promise<KeyboardFeatures> {
     const a = new Uint8Array(56)
     a.set((await this.info(Info.Features, [], 56)).subarray(0, 56))
     const bit = (byte: number, n: number) => ((byte >> n) & 1) === 1

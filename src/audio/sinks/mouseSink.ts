@@ -25,9 +25,11 @@
  */
 import type { RGB } from '@/model/device'
 import type { DongleBar, MouseDriver, MouseLightEffect, MouseMusicCapabilities, MouseMusicService } from '@/model/mouse'
+import { OnsetDetector } from '../onset'
 import { TempoTracker, breathingSpeed, type Tempo } from '../tempo'
 import type { LightingSink, MusicFrame, SinkStatus } from '../types'
 
+export type MouseReaction = 'beat' | 'bass' | 'mid' | 'treble'
 export type MouseSinkStrategy = 'amplitude' | 'pulse' | 'strobe' | 'dongle' | 'gentle'
 export type MouseSinkMode = 'none' | 'amplitude' | 'pulse (firmware breathing)' | 'strobe (beat writes)' | 'receiver bar' | 'gentle (memory-safe)'
 
@@ -52,6 +54,13 @@ export interface MouseSinkOptions {
   strobeOnMs: number
   /** Strobe mode: beats weaker than this (0..1) do not flash. */
   strobeBeatThreshold: number
+  /** How often to re-assert the light's on byte, in case the firmware blanked it while idle. 0 disables. */
+  keepAwakeMs: number
+  /**
+   * What the mouse follows: the whole mix's beat, or an onset in one band — `bass` for the kick, `treble` for
+   * hi-hats and snares. A band also drives the brightness, so the mouse tracks that part of the music alone.
+   */
+  reactTo: MouseReaction
   /** Memory writes allowed per session; the sink pauses itself once reached. */
   writeBudget: number
   /** Strategy to try first; `auto` = amplitude → receiver bar → gentle. An unavailable choice falls back to `auto`. */
@@ -71,7 +80,11 @@ export const DEFAULT_MOUSE_SINK_OPTIONS: MouseSinkOptions = {
   strobeFps: 14,
   strobeOnMs: 90,
   strobeBeatThreshold: 0.12,
-  writeBudget: 2000,
+  keepAwakeMs: 20_000,
+  reactTo: 'beat',
+  // No cap by default: the light bar has been shown to take live writes on real hardware, and a strobe that stops
+  // mid-track is worse than the wear. Set a number to make the sink pause itself after that many writes.
+  writeBudget: Number.POSITIVE_INFINITY,
   prefer: 'auto',
   accent: { r: 155, g: 255, b: 49 },
 }
@@ -231,8 +244,16 @@ export class MouseSink implements LightingSink {
   private readonly tempo = new TempoTracker()
   /** Strobe: when the current flash was lit, or undefined while dark. */
   private litSince: number | undefined
+  private readonly bandOnset = new OnsetDetector()
+  /** The band `bandOnset` is currently tuned to; switching bands must start it over. */
+  private onsetBand: MouseReaction = 'beat'
+  private lastWake = -Infinity
+  private waking = false
   /** Round-trip of the last settings-memory write, ms — what limits how fast a software strobe can blink. */
   private writeMs = 0
+  /** Grows while the mouse fails to answer writes, so the sink stops pushing a device that cannot keep up. */
+  private backoff = 1
+  private timeouts = 0
   /** The receiver bar, driven alongside a body-light strategy. */
   private bar = false
   private barInFlight = false
@@ -263,7 +284,13 @@ export class MouseSink implements LightingSink {
     this.lastEffect = undefined
     this.tempo.reset()
     this.litSince = undefined
+    this.bandOnset.reset()
+    this.onsetBand = this.options.reactTo
+    this.lastWake = -Infinity
+    this.waking = false
     this.writeMs = 0
+    this.backoff = 1
+    this.timeouts = 0
     this.bar = false
     this.barInFlight = false
     this.lastBarSend = -Infinity
@@ -342,8 +369,10 @@ export class MouseSink implements LightingSink {
   push(frame: MusicFrame): void {
     if (!this.active || !this.music || !this.strategy) return
     const now = frame.audio.time
-    if (frame.audio.beat) this.tempo.beat(now)
+    const react = this.reaction(frame, now)
+    if (react.fire) this.tempo.beat(now)
     if (this.strategy !== 'dongle') this.pushBar(frame, now)
+    this.keepAwake(now)
     if (this.inFlight) return
     let write: Promise<void>
     let memory = false
@@ -355,12 +384,12 @@ export class MouseSink implements LightingSink {
       }
       case 'pulse': {
         // The firmware runs the fade; a write is only needed when the look itself should change.
-        if (now - this.lastSend < this.options.pulseMinIntervalMs) return
+        if (now - this.lastSend < this.options.pulseMinIntervalMs * this.backoff) return
         const next: MouseLightEffect = {
           mode: BREATHING_LIGHT_MODE,
           color: frame.accent,
           speed: breathingSpeed(this.tempo.tempo.bpm, this.options.pulseSpeedOffset),
-          brightness: pulseBrightness(frame.intensity, this.lastEffect?.brightness),
+          brightness: pulseBrightness(react.level, this.lastEffect?.brightness),
         }
         if (!effectChanged(next, this.lastEffect, this.options.pulseColorThreshold)) return
         if (this.budgetReached()) return
@@ -371,10 +400,15 @@ export class MouseSink implements LightingSink {
       }
       case 'strobe': {
         // Pure software blink: light up on the onset, write the dark frame once the flash has been seen.
-        if (now - this.lastSend < 1000 / this.options.strobeFps) return
-        const beat = frame.audio.beat && frame.audio.beatStrength >= this.options.strobeBeatThreshold
+        const beat = react.fire && react.strength >= this.options.strobeBeatThreshold
+        // A beat always gets its flash; only the dark frame waits for the pacing gate.
+        // A beat always gets its flash — unless the mouse is behind, in which case it must be given room.
+        if (now - this.lastSend < this.minGapMs) return
+        if (!beat && now - this.lastSend < (1000 / this.options.strobeFps) * this.backoff) return
         const lit = beat || (this.litSince !== undefined && now - this.litSince < this.options.strobeOnMs)
-        if (lit && this.litSince === undefined) this.litSince = now
+        // A beat restarts the flash window, so a run of close beats stays lit rather than going dark between them.
+        if (beat) this.litSince = now
+        else if (lit && this.litSince === undefined) this.litSince = now
         if (!lit && this.litSince === undefined) return // already dark and no beat: nothing to write
         const next = strobeFrame(frame.accent, lit)
         if (!effectChanged(next, this.lastEffect, 12)) return
@@ -395,9 +429,9 @@ export class MouseSink implements LightingSink {
         break
       }
       case 'gentle': {
-        if (!frame.audio.beat || frame.audio.beatStrength < this.options.gentleBeatThreshold) return
+        if (!react.fire || react.strength < this.options.gentleBeatThreshold) return
         if (this.budgetReached()) return
-        if (now - this.lastSend < this.options.gentleMinIntervalMs) return
+        if (now - this.lastSend < this.options.gentleMinIntervalMs * this.backoff) return
         write = this.music.setLightColor(frame.accent, LIGHT_BRIGHTNESS_MAX)
         memory = true
         break
@@ -409,10 +443,19 @@ export class MouseSink implements LightingSink {
     write
       .then(() => {
         this.error = undefined
-        if (memory) this.writeMs = Math.round(nowMs() - startedAt)
+        if (memory) {
+          this.writeMs = Math.round(nowMs() - startedAt)
+          if (this.backoff > 1) this.backoff = Math.max(1, this.backoff * 0.9)
+        }
       })
       .catch((e: Error) => {
-        this.error = e.message
+        // A write that was not acknowledged usually means the mouse is still busy with the last one. Back off
+        // rather than keep hammering it; a run of successes winds this back down.
+        if (/timed out|timeout/i.test(e.message)) {
+          this.timeouts++
+          this.backoff = Math.min(8, this.backoff * 1.6)
+          this.note = `the mouse is not keeping up with live writes (${this.timeouts} missed); slowing down`
+        } else this.error = e.message
       })
       .finally(() => {
         // Counted whether or not the device acknowledged: a rejected flash write may still have cost an erase cycle.
@@ -423,6 +466,26 @@ export class MouseSink implements LightingSink {
           if (this.memoryWrites >= this.options.writeBudget) this.note = BUDGET_NOTE
         }
       })
+  }
+
+  /**
+   * What this mouse reacts to this frame: the mix's own onset, or one band's. Returns whether to fire and how
+   * strongly, plus the level that drives brightness.
+   */
+  private reaction(frame: MusicFrame, now: number): { fire: boolean; strength: number; level: number } {
+    const band = this.options.reactTo
+    if (band === 'beat') {
+      this.onsetBand = 'beat'
+      return { fire: frame.audio.beat, strength: frame.audio.beatStrength, level: frame.intensity }
+    }
+    // Each band has its own running peak and statistics; carrying them across a switch would gate the new band out.
+    if (band !== this.onsetBand) {
+      this.onsetBand = band
+      this.bandOnset.reset()
+    }
+    const value = band === 'bass' ? frame.audio.bass : band === 'mid' ? frame.audio.mid : frame.audio.treble
+    const r = this.bandOnset.feed(value, now, frame.beatSensitivity)
+    return { fire: r.onset, strength: r.strength, level: r.normalized }
   }
 
   /** The receiver's RGB bar: a command, so it is paced by time only and never touches the budget. */
@@ -447,6 +510,41 @@ export class MouseSink implements LightingSink {
       .finally(() => {
         this.barInFlight = false
       })
+  }
+
+  /**
+   * The mouse blanks its light after an idle timeout even with the timer pushed out, so the on byte is re-asserted
+   * periodically. Without it the lights simply stop part-way through a session and never come back.
+   */
+  private keepAwake(now: number): void {
+    const every = this.options.keepAwakeMs
+    const body = this.strategy === 'pulse' || this.strategy === 'strobe' || this.strategy === 'gentle'
+    if (!every || !body || this.waking || !this.music) return
+    if (now - this.lastWake < every) return
+    if (this.memoryWrites >= this.options.writeBudget) return
+    if (this.lastWake === -Infinity) {
+      this.lastWake = now // the session has just started: the light is already on
+      return
+    }
+    this.lastWake = now
+    this.waking = true
+    this.music
+      .setLightOn()
+      .then(() => {
+        this.memoryWrites++
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        this.waking = false
+      })
+  }
+
+  /**
+   * Shortest gap the mouse has shown it can take: writes land in flash, and pushing another before the last has
+   * been digested is what makes `0x07` time out. 1.3 × the measured round-trip leaves it headroom.
+   */
+  private get minGapMs(): number {
+    return this.writeMs > 0 ? this.writeMs * 1.3 * this.backoff : 0
   }
 
   private budgetReached(): boolean {

@@ -6,7 +6,14 @@ import { CompxMouseDriver } from './driver'
 import { Addr } from './eeprom'
 import { complementPair, sumsTo55 } from './frame'
 import { CompxLink } from './link'
-import { decodeDongleBar, encodeDongleBar, encodeMusicParams, packAmplitudes, unpackAmplitudes } from './music'
+import {
+  SESSION_SLEEP_BYTE,
+  decodeDongleBar,
+  encodeDongleBar,
+  encodeMusicParams,
+  packAmplitudes,
+  unpackAmplitudes,
+} from './music'
 
 const PARAMS = {
   mode: 2,
@@ -53,27 +60,43 @@ describe('CompxMusic.enterLightSession', () => {
     await driver.hid.readRange(Addr.Light, Addr.MovingOffLight + 2) // refresh the host shadow
     expect((await driver.lighting.get()).offWhileMoving).toBe(true)
 
+    const sleepBefore = fw[Addr.SleepTime]
+    expect(sleepBefore).toBeLessThan(SESSION_SLEEP_BYTE) // the model ships with a short idle light-off
+
     await driver.music.enterLightSession()
     expect(fw[Addr.MovingOffLight]).toBe(0) // a hand on the mouse no longer blanks the light
     expect(fw[Addr.LightState]).toBe(1)
-    expect(driver.music.flashWrites).toBe(2)
+    expect(fw[Addr.SleepTime]).toBe(SESSION_SLEEP_BYTE) // …and it no longer goes out part-way through a track
+    expect(driver.music.flashWrites).toBe(3)
 
     await driver.music.setLightEffect({ mode: 3, color: { r: 255, g: 255, b: 255 }, speed: 0, brightness: 9 })
     await driver.music.restore()
     expect(fw[Addr.MovingOffLight]).toBe(1)
     expect(fw[Addr.LightState]).toBe(0)
+    expect(fw[Addr.SleepTime]).toBe(sleepBefore)
     await driver.disconnect()
   })
 
-  it('writes nothing when the light is already on and stays on while moving', async () => {
+  it('writes nothing when the light is already on, stays on while moving, and never idles out', async () => {
     const sim = createSimCompxMouse({ link: 'dongle' })
     const driver = await sim.openDriver()
     const fw = sim.firmware.flash
     fw.set(complementPair(0), Addr.MovingOffLight)
     fw.set(complementPair(1), Addr.LightState)
+    fw.set(complementPair(SESSION_SLEEP_BYTE), Addr.SleepTime)
     await driver.hid.readRange(Addr.Light, Addr.MovingOffLight + 2)
     await driver.music.enterLightSession()
     expect(driver.music.flashWrites).toBe(0)
+    await driver.disconnect()
+  })
+
+  it('setLightOn re-asserts the on byte for a bar the firmware blanked', async () => {
+    const sim = createSimCompxMouse({ link: 'dongle' })
+    const driver = await sim.openDriver()
+    sim.firmware.flash.set(complementPair(0), Addr.LightState)
+    await driver.music.setLightOn()
+    expect(sim.firmware.flash[Addr.LightState]).toBe(1)
+    expect(driver.music.flashWrites).toBe(1)
     await driver.disconnect()
   })
 })

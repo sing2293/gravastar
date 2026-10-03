@@ -25,7 +25,7 @@ import type {
 } from '@/model/mouse'
 import { Addr, encodeLightBlock } from './eeprom'
 import { Command, FRAME_SIZE, PAYLOAD_MAX, buildFrame, type ParsedFrame } from './frame'
-import type { CompxLink } from './link'
+import { STREAM_REQUEST, type CompxLink } from './link'
 
 /** Office-keyboard commands (`HIDHandle.js:245-248`) that `Command` in frame.ts does not list. */
 export const enum MusicCommand {
@@ -44,6 +44,8 @@ export const BREATHING_MODE = 2
 export const FIXED_COLOUR_MODE = 3
 export const LIGHT_BRIGHTNESS_MAX = 9
 export const LIGHT_SPEED_MAX = 9
+/** 0xAD is in units of 10 s; 90 = 15 minutes, the longest the vendor UI offers. */
+export const SESSION_SLEEP_BYTE = 90
 
 // ---------------------------------------------------------------------------
 // Codecs (pure)
@@ -138,6 +140,8 @@ export class CompxMusic implements MouseMusicService {
   flashWrites = 0
   /** Whether `enterLightSession` had to clear the firmware's "light off while moving" byte. */
   private movingOffCleared = false
+  /** Original sleep / light-off byte (0xAD), while a session holds it at the maximum. */
+  private sleepByteHeld: number | undefined
   /** 0xB6 frames sent (fire-and-forget, never confirmed). */
   amplitudeFrames = 0
   private caps: MouseMusicCapabilities | undefined
@@ -219,6 +223,33 @@ export class CompxMusic implements MouseMusicService {
       this.flashWrites++
       await this.host.hid.writeValue(Addr.LightState, 1)
     }
+    /*
+     * The same byte is the mouse's sleep timer and its "turn the decorative light off once stationary" timer
+     * (02-features.md §8), and ships at 10-60 s on these models. Left alone, the light goes out part-way through a
+     * track and never comes back — so a session holds it at the longest option and `restore` puts it back.
+     */
+    const sleep = this.host.hid.flash[Addr.SleepTime] ?? 0
+    if (sleep && sleep < SESSION_SLEEP_BYTE) {
+      this.sleepByteHeld = sleep
+      this.flashWrites++
+      await this.host.hid.writeValue(Addr.SleepTime, SESSION_SLEEP_BYTE)
+    }
+  }
+
+  /** The user's own sleep/light-off byte while a session is holding the hardware value at the maximum. */
+  get heldSleepByte(): number | undefined {
+    return this.sleepByteHeld
+  }
+
+  /** Re-points the held original, so a sleep time changed during a session survives `restore`. */
+  setHeldSleepByte(value: number): void {
+    this.sleepByteHeld = value
+  }
+
+  /** One value write: the light's on byte. Used to wake a bar the firmware has blanked. */
+  async setLightOn(): Promise<void> {
+    this.flashWrites++
+    await this.host.hid.writeValue(Addr.LightState, 1, STREAM_REQUEST)
   }
 
   /** 0x19; `undefined` when the receiver has no bar. */
@@ -272,6 +303,13 @@ export class CompxMusic implements MouseMusicService {
         this.movingOffCleared = false
       })
     }
+    if (this.sleepByteHeld !== undefined) {
+      const original = this.sleepByteHeld
+      await attempt(async () => {
+        await this.host.hid.writeValue(Addr.SleepTime, original)
+        this.sleepByteHeld = undefined
+      })
+    }
     if (failure) throw failure
   }
 
@@ -319,7 +357,7 @@ export class CompxMusic implements MouseMusicService {
   }
 
   private async writeBar(bar: DongleBar): Promise<void> {
-    const reply = await this.host.hid.command(Command.SetDongleRGBBarMode, encodeDongleBar(bar))
+    const reply = await this.host.hid.command(Command.SetDongleRGBBarMode, encodeDongleBar(bar), STREAM_REQUEST)
     if (reply.status !== 0) throw new Error('the receiver has no RGB bar (0x18 rejected)')
   }
 
@@ -345,6 +383,7 @@ export class CompxMusic implements MouseMusicService {
         speed: clamp(Math.round(effect.speed) || 0, 0, LIGHT_SPEED_MAX),
         brightness: clamp(Math.round(effect.brightness) || 0, 0, LIGHT_BRIGHTNESS_MAX),
       }),
+      STREAM_REQUEST,
     )
   }
 

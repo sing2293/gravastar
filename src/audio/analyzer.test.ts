@@ -74,6 +74,36 @@ describe('onset detection on difficult material', () => {
   })
 })
 
+describe('silence and session start', () => {
+  it('reports no beats for digital silence or a quiet room tone', () => {
+    const fx = new FeatureExtractor(DEFAULT_ANALYZER, 48000, 1024)
+    const silentTime = new Uint8Array(2048).fill(128)
+    let beats = 0
+    for (let i = 0; i < 200; i++) if (fx.extract(new Uint8Array(1024), silentTime, i * 20).beat) beats++
+    expect(beats).toBe(0)
+
+    // Room tone: a little broadband noise, no structure. Only relative tests would fire on its tail.
+    const noise = new FeatureExtractor(DEFAULT_ANALYZER, 48000, 1024)
+    let noiseBeats = 0
+    for (let i = 0; i < 300; i++) {
+      const mag = new Uint8Array(1024).map(() => 2 + Math.round(Math.random() * 3))
+      const time = new Uint8Array(2048).map(() => 128 + Math.round((Math.random() - 0.5) * 2))
+      if (noise.extract(mag, time, i * 20).beat) noiseBeats++
+    }
+    expect(noiseBeats).toBe(0)
+  })
+
+  it('does not treat the first frame as an onset', () => {
+    const fx = new FeatureExtractor(DEFAULT_ANALYZER, 48000, 1024)
+    const loud = new Uint8Array(2048).map((_, i) => 128 + Math.round(100 * Math.sin(i / 10)))
+    const full = spectrum(1024, () => 0.8)
+    expect(fx.extract(full, loud, 0).beat).toBe(false) // the spectrum appearing is not an attack
+    // …and the first frame has not poisoned the statistics: a real attack soon after is still found.
+    for (let i = 1; i < 12; i++) fx.extract(spectrum(1024, () => 0.2), loud, i * 20)
+    expect(fx.extract(spectrum(1024, () => 0.9), loud, 12 * 20).beat).toBe(true)
+  })
+})
+
 describe('presets', () => {
   const frame = { time: 0, level: 0.8, bands: Float32Array.from({ length: 24 }, (_, i) => (i < 12 ? 0.9 : 0.1)), bass: 0.9, mid: 0.3, treble: 0.1, beat: true, beatStrength: 0.7 }
   it('render a lighting frame for every key or a single colour', () => {
