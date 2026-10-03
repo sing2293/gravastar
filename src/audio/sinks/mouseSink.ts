@@ -54,7 +54,11 @@ export interface MouseSinkOptions {
   strobeOnMs: number
   /** Strobe mode: beats weaker than this (0..1) do not flash. */
   strobeBeatThreshold: number
-  /** How often to re-assert the light's on byte, in case the firmware blanked it while idle. 0 disables. */
+  /**
+   * How often to re-assert the light while a session runs, in case the firmware blanked it after the mouse sat
+   * still. Pulse mode writes nothing on its own once the look is steady, so without this the bar goes out and
+   * stays out when the mouse is left untouched. 0 disables.
+   */
   keepAwakeMs: number
   /**
    * What the mouse follows: the whole mix's beat, or an onset in one band — `bass` for the kick, `treble` for
@@ -78,9 +82,9 @@ export const DEFAULT_MOUSE_SINK_OPTIONS: MouseSinkOptions = {
   pulseColorThreshold: 60,
   pulseSpeedOffset: 0,
   strobeFps: 14,
-  strobeOnMs: 90,
+  strobeOnMs: 60,
   strobeBeatThreshold: 0.12,
-  keepAwakeMs: 20_000,
+  keepAwakeMs: 5_000,
   reactTo: 'beat',
   // No cap by default: the light bar has been shown to take live writes on real hardware, and a strobe that stops
   // mid-track is worse than the wear. Set a number to make the sink pause itself after that many writes.
@@ -94,6 +98,8 @@ export const DEFAULT_MOUSE_SINK_OPTIONS: MouseSinkOptions = {
  * time while only colour and brightness follow the music. The base contract only promises `snapshot(): void`.
  */
 export interface MouseMusicSnapshotReader {
+  /** `false` when the mouse refused the long idle light-off timer, so it will blank itself when left alone. */
+  readonly idleTimerHeld?: boolean | undefined
   /** What `snapshot()` captured for the receiver bar, without bus traffic. */
   dongleBarSnapshot?(): DongleBar | undefined
   /** Asks the receiver with 0x19 (`CompxMusic.readDongleBar`); `undefined` when there is no bar. */
@@ -336,6 +342,8 @@ export class MouseSink implements LightingSink {
       if (strategy === 'pulse' || strategy === 'strobe' || strategy === 'gentle') {
         try {
           await this.music.enterLightSession()
+          if ((this.music as MouseMusicService & MouseMusicSnapshotReader).idleTimerHeld === false)
+            this.note = 'this mouse kept its own idle light-off timer, so its light may go dark when left untouched'
         } catch (e) {
           this.note = `could not take over the light (${(e as Error).message})`
         }
@@ -519,7 +527,7 @@ export class MouseSink implements LightingSink {
   private keepAwake(now: number): void {
     const every = this.options.keepAwakeMs
     const body = this.strategy === 'pulse' || this.strategy === 'strobe' || this.strategy === 'gentle'
-    if (!every || !body || this.waking || !this.music) return
+    if (!every || !body || this.waking || this.inFlight || !this.music) return
     if (now - this.lastWake < every) return
     if (this.memoryWrites >= this.options.writeBudget) return
     if (this.lastWake === -Infinity) {
@@ -528,8 +536,11 @@ export class MouseSink implements LightingSink {
     }
     this.lastWake = now
     this.waking = true
-    this.music
-      .setLightOn()
+    // Re-writing the whole block, not just the on byte: a firmware that blanked the bar comes back showing the
+    // look it should be, and a block write switches the light on by itself.
+    const effect = this.lastEffect
+    const wake = effect ? this.music.setLightEffect(effect) : this.music.setLightOn()
+    wake
       .then(() => {
         this.memoryWrites++
       })

@@ -70,8 +70,10 @@ is JSON of these types; vendor profile files are converted at the edge.
   threshold that follows the recent mean plus a few standard deviations, with a decaying peak-relative floor. It
   needs no absolute loudness, so a quiet stream or a bass-light track produces the same onsets as a loud one (the
   earlier `bass > 0.08` gate simply never fired on either). `beatSensitivity` is a live knob on the extractor.
-- Engine options also carry `randomColor`: a new golden-angle hue on every beat, used as both the preset colour and
-  the single-light accent, so a mouse changes colour per beat. The status publishes the running beat count and the
+- Engine options carry a `colorMode`: `preset` (each preset's own palette), `fixed` (the keyboard sink repaints the
+  animation in the chosen colour, keeping each key's brightness — without it the picker does nothing, since most
+  presets are rainbows that ignore `color`), or `random` (a new golden-angle hue on every beat). The accent follows
+  the same rule, so a mouse changes colour per beat. The status publishes the running beat count and the
   tempo from `TempoTracker` on each beat, which is how a user confirms onsets are being found at all.
 - `musicSync.ts`: **one engine, many sinks.** The engine owns the audio source and the analysis loop; every
   connected device registers a `LightingSink` (`sinks/keyboardSink.ts`, `sinks/mouseSink.ts`) that receives a
@@ -113,8 +115,13 @@ is JSON of these types; vendor profile files are converted at the edge.
   multiplies every gate by a backoff that grows on timeouts and decays on success — a mouse that cannot keep up is
   given room instead of being hammered. `enterLightSession` also parks the sleep / light-off byte (`0xAD`) at its
   maximum for the session, because its stock 10–60 s idle timer otherwise blanks the bar part-way through a track;
-  the light's on byte is re-asserted every `keepAwakeMs` as well, and the power service reports the user's own sleep
-  value while the session holds the hardware one. Before any body-light strategy runs, `enterLightSession` switches the light on and clears
+  the whole light block is re-asserted every `keepAwakeMs` (5 s) as well — pulse mode writes nothing on its own once
+  the look is steady, so without it a mouse left untouched goes dark and stays dark — and the power service reports
+  the user's own sleep value while the session holds the hardware one. The idle-timer write is read back; if the
+  mouse refused it, the sink says so rather than leaving the user guessing.
+- Latency matters as much as throughput: `AnalyserNode.smoothingTimeConstant` is an exponential average of the FFT,
+  so it is delay between the sound and the light (0.2, down from 0.55), and the audio-thread clock runs a 512-sample
+  buffer (~11 ms) rather than 1024. Before any body-light strategy runs, `enterLightSession` switches the light on and clears
   the firmware's **"light off while moving"** byte (`0xB3`) — left set, it blanks the light exactly while a hand is
   on the mouse, which makes any animation look dead; `restore` puts both back. Changing the path mid-session calls
   `MusicSyncEngine.refreshSink`, and the panel's **flash test** blinks the mouse with no audio at all, separating

@@ -46,6 +46,8 @@ export const LIGHT_BRIGHTNESS_MAX = 9
 export const LIGHT_SPEED_MAX = 9
 /** 0xAD is in units of 10 s; 90 = 15 minutes, the longest the vendor UI offers. */
 export const SESSION_SLEEP_BYTE = 90
+/** What to restore when the stored record was unreadable (vendor default, 60 s). */
+export const DEFAULT_SLEEP_BYTE = 6
 
 // ---------------------------------------------------------------------------
 // Codecs (pure)
@@ -228,13 +230,31 @@ export class CompxMusic implements MouseMusicService {
      * (02-features.md §8), and ships at 10-60 s on these models. Left alone, the light goes out part-way through a
      * track and never comes back — so a session holds it at the longest option and `restore` puts it back.
      */
-    const sleep = this.host.hid.flash[Addr.SleepTime] ?? 0
-    if (sleep && sleep < SESSION_SLEEP_BYTE) {
-      this.sleepByteHeld = sleep
+    const flash = this.host.hid.flash
+    const stored = flash[Addr.SleepTime] ?? 0xff
+    // An unread or invalid record (the complement must sum to 0x55) means we cannot trust the value — raise it
+    // anyway, and keep the vendor default to restore rather than writing 0xFF back.
+    const valid = ((stored + (flash[Addr.SleepTime + 1] ?? 0)) & 0xff) === 0x55
+    if (!valid || stored < SESSION_SLEEP_BYTE) {
+      this.sleepByteHeld = valid ? stored : DEFAULT_SLEEP_BYTE
       this.flashWrites++
       await this.host.hid.writeValue(Addr.SleepTime, SESSION_SLEEP_BYTE)
-    }
+      // Read it back: if the mouse refused, its light will still go out while it sits still and the caller should
+      // say so rather than leave the user wondering.
+      try {
+        const [applied] = await this.host.hid.readBytes(Addr.SleepTime, 2)
+        this.idleTimerHeld = applied === SESSION_SLEEP_BYTE
+      } catch {
+        this.idleTimerHeld = undefined
+      }
+    } else this.idleTimerHeld = true
   }
+
+  /**
+   * Whether the mouse accepted the long idle light-off timer: `false` means it will keep blanking its own light
+   * when it sits still, whatever the host writes. `undefined` when it could not be checked.
+   */
+  idleTimerHeld: boolean | undefined
 
   /** The user's own sleep/light-off byte while a session is holding the hardware value at the maximum. */
   get heldSleepByte(): number | undefined {

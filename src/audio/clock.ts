@@ -16,7 +16,7 @@ export interface TickSource {
 const clampPow2 = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, 2 ** Math.round(Math.log2(Math.max(1, n)))))
 
 /** Ticks from the audio thread, every `bufferSize / sampleRate` seconds (1024 samples @ 48 kHz ≈ 21 ms ≈ 47 Hz). */
-export function audioClock(ctx: AudioContext, input?: AudioNode, targetMs = 20): TickSource {
+export function audioClock(ctx: AudioContext, input?: AudioNode, targetMs = 11): TickSource {
   let node: ScriptProcessorNode | undefined
   let mute: GainNode | undefined
   return {
@@ -51,7 +51,7 @@ export function audioClock(ctx: AudioContext, input?: AudioNode, targetMs = 20):
 export const supportsAudioClock = (ctx: AudioContext): boolean => typeof ctx.createScriptProcessor === 'function'
 
 /** Animation frames while visible, a (throttled) interval while hidden — the best a page can do without audio. */
-export function frameClock(targetMs = 20): TickSource {
+export function frameClock(targetMs = 11): TickSource {
   let raf = 0
   let timer: ReturnType<typeof setInterval> | undefined
   let tick: (() => void) | undefined

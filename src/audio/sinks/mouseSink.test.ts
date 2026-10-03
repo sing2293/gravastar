@@ -104,6 +104,7 @@ function frame(
     t: time / 1000,
     preset: 'spectrum',
     beatSensitivity: 1,
+    colorMode: 'preset',
     color: { r: 255, g: 0, b: 0 },
     sensitivity: 1,
     accent: ACCENT,
@@ -445,7 +446,7 @@ describe('MouseSink pulse mode (firmware breathing)', () => {
     expect(pulseBrightness(0.3, 6)).toBe(6) // inside the dead band: stays where it is
     expect(pulseBrightness(0.2, 6)).toBe(3) // below it: falls back
     const music = new StubMusic({ flashLight: true })
-    const sink = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'pulse', pulseMinIntervalMs: 0 })
+    const sink = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'pulse', pulseMinIntervalMs: 0, keepAwakeMs: 0 })
     await sink.prepare()
     // One steady colour, loudness breathing around the middle of the range: the firmware keeps the movement.
     for (let t = 0; t < 30_000; t += 20) {
@@ -672,11 +673,24 @@ describe('MouseSink keeping the light awake', () => {
     const sink = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'pulse', keepAwakeMs: 1000 })
     await sink.prepare()
     await sweep(sink, 0, 900, 100)
-    expect(music.calls.filter((c) => c === 'setLightOn')).toHaveLength(0) // not in the first interval
+    const first = music.effects.length
     await sweep(sink, 1000, 4000, 100)
-    const wakes = music.calls.filter((c) => c === 'setLightOn').length
+    // Pulse writes nothing while the look is steady, so every extra write here is a keep-awake re-assert.
+    const wakes = music.effects.length - first
     expect(wakes).toBeGreaterThanOrEqual(2)
     expect(wakes).toBeLessThanOrEqual(4)
+    expect(music.effects[music.effects.length - 1]).toEqual(music.effects[first - 1]) // the same look, re-asserted
+  })
+
+  it('warns when the mouse keeps its own idle light-off timer', async () => {
+    class StubbornMouse extends StubMusic implements MouseMusicSnapshotReader {
+      idleTimerHeld = false
+    }
+    const music = new StubbornMouse({ flashLight: true })
+    const sink = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'pulse' })
+    await sink.prepare()
+    expect(sink.status().note).toMatch(/idle light-off timer/)
+    expect(sink.status().active).toBe(true) // it still runs; the user just knows why it may go dark
   })
 
   it('does not wake anything in receiver-bar mode or when disabled', async () => {
@@ -684,13 +698,13 @@ describe('MouseSink keeping the light awake', () => {
     const barSink = new MouseSink('m', 'Mouse', driverWith(bar), { prefer: 'dongle', keepAwakeMs: 500 })
     await barSink.prepare()
     await sweep(barSink, 0, 3000, 100)
-    expect(bar.calls).not.toContain('setLightOn')
+    expect(bar.calls).not.toContain('setLightEffect')
 
     const off = new StubMusic({ flashLight: true })
     const offSink = new MouseSink('m', 'Mouse', driverWith(off), { prefer: 'pulse', keepAwakeMs: 0 })
     await offSink.prepare()
-    await sweep(offSink, 0, 3000, 100)
-    expect(off.calls).not.toContain('setLightOn')
+    await sweep(offSink, 0, 10_000, 100)
+    expect(off.effects).toHaveLength(1) // only the initial look; nothing re-asserted
   })
 })
 

@@ -1,6 +1,7 @@
 import type { BeadColor, KeyboardDriver, KeyboardLayout, LedBead, PerKeyColor, ZoneLighting } from '@/model/keyboard'
 import { expandLedAliases, ledIds } from '@/drivers/k98pro/layout'
 import { presetById } from '../presets'
+import type { RGB } from '@/model/device'
 import type { LightingFrame, LightingSink, MusicFrame, SinkStatus } from '../types'
 
 export interface KeyboardSinkOptions {
@@ -109,12 +110,27 @@ export class KeyboardSink implements LightingSink {
     return Promise.all(sends).then(() => undefined)
   }
 
+  /**
+   * Keeps the animation's shape but paints it in one colour: each key's brightness (its strongest channel) scaled
+   * onto the target. Without this the colour picker would do nothing for the rainbow presets, which is most of them.
+   */
+  private static tint(color: RGB, target: RGB): RGB {
+    const v = Math.max(color.r, color.g, color.b) / 255
+    return { r: Math.round(target.r * v), g: Math.round(target.g * v), b: Math.round(target.b * v) }
+  }
+
   push(frame: MusicFrame): void {
     if (!this.active || this.sending) return
     const now = frame.audio.time
     if (now - this.lastSend < 1000 / this.pace) return
     const preset = presetById(frame.preset)
-    const lighting = preset.render(frame.audio, { layout: this.layout, t: frame.t, color: frame.color, sensitivity: frame.sensitivity })
+    let lighting = preset.render(frame.audio, { layout: this.layout, t: frame.t, color: frame.color, sensitivity: frame.sensitivity })
+    if (frame.colorMode !== 'preset' && !preset.usesColor) {
+      lighting =
+        'all' in lighting
+          ? { all: KeyboardSink.tint(lighting.all, frame.color) }
+          : { keys: lighting.keys.map((k) => ({ id: k.id, color: KeyboardSink.tint(k.color, frame.color) })) }
+    }
     this.lastLighting = lighting
     this.lastSend = now
     this.sending = true

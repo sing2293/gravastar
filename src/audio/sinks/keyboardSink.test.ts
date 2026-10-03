@@ -30,12 +30,51 @@ function frame(time: number, preset = 'pulse'): MusicFrame {
     t: time / 1000,
     preset,
     beatSensitivity: 1,
+    colorMode: 'preset',
     color: { r: 155, g: 255, b: 49 },
     sensitivity: 1,
     accent: { r: 155, g: 255, b: 49 },
     intensity: 0.6,
   }
 }
+
+describe('KeyboardSink colour modes', () => {
+  it('paints a rainbow preset in one colour while keeping its shape', async () => {
+    const { sim, sink } = await setup()
+    await sink.prepare()
+    sink.push({ ...frame(1000, 'spectrum'), colorMode: 'fixed', color: { r: 0, g: 0, b: 255 } })
+    await tick()
+    const lit = sink.lastLighting!
+    if ('all' in lit) throw new Error('per key expected')
+    const colours = lit.keys.filter((k) => k.color.r + k.color.g + k.color.b > 0)
+    expect(colours.length).toBeGreaterThan(0)
+    // Every lit key is the picked blue at some brightness — no rainbow left, but the animation still has shape.
+    for (const k of colours) {
+      expect(k.color.r).toBe(0)
+      expect(k.color.g).toBe(0)
+      expect(k.color.b).toBeGreaterThan(0)
+    }
+    expect(new Set(colours.map((k) => k.color.b)).size).toBeGreaterThan(1)
+    expect(sim.lighting.streamed.length).toBeGreaterThan(0)
+    await sink.release()
+  })
+
+  it('leaves the preset alone in preset mode and when the preset owns its colour', async () => {
+    const { sink } = await setup()
+    await sink.prepare()
+    sink.push({ ...frame(1000, 'spectrum'), colorMode: 'preset' })
+    await tick()
+    const lit = sink.lastLighting!
+    if ('all' in lit) throw new Error('per key expected')
+    expect(lit.keys.some((k) => k.color.r > 0 && k.color.b === 0)).toBe(true) // rainbow survives
+
+    // `pulse` already uses the chosen colour, so it must not be tinted twice.
+    sink.push({ ...frame(2000, 'pulse'), colorMode: 'fixed', color: { r: 10, g: 20, b: 30 } })
+    await tick()
+    expect('all' in sink.lastLighting!).toBe(true)
+    await sink.release()
+  })
+})
 
 describe('KeyboardSink over the simulated K98 Pro', () => {
   it('prepare switches the main zone to the custom effect and release restores the previous record', async () => {

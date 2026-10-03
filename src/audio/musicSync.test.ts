@@ -310,7 +310,7 @@ describe('MusicSyncEngine colour and beat options', () => {
     const { engine } = harness()
     const sink = new FakeSink('m', 'Mouse', 'mouse')
     engine.addSink(sink)
-    engine.update({ randomColor: true })
+    engine.update({ colorMode: 'random' })
     await engine.start('system')
     for (let t = 0; t < 6; t++) engine.step(1000 + t * 100) // every scripted frame carries a beat
     const colours = sink.frames.map((f) => `${f.color.r},${f.color.g},${f.color.b}`)
@@ -319,7 +319,7 @@ describe('MusicSyncEngine colour and beat options', () => {
     for (const f of sink.frames) expect(f.accent).toEqual(f.color)
     expect(engine.getStatus().beats).toBeGreaterThan(0)
 
-    engine.update({ randomColor: false, color: { r: 1, g: 2, b: 3 } })
+    engine.update({ colorMode: 'fixed', color: { r: 1, g: 2, b: 3 } })
     engine.step(2000)
     expect(sink.frames[sink.frames.length - 1]!.color).toEqual({ r: 1, g: 2, b: 3 })
     await engine.stop()

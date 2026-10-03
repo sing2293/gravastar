@@ -8,7 +8,7 @@ import { captureAudio, type CapturedAudio } from './capture'
 import type { TickSource } from './clock'
 import { PRESETS, hsv, presetById, type MusicPreset } from './presets'
 import { TempoTracker } from './tempo'
-import type { AudioFrame, AudioSourceKind, LightingSink, MusicFrame, MusicSyncStatus, SinkStatus } from './types'
+import type { AudioFrame, AudioSourceKind, ColorMode, LightingSink, MusicFrame, MusicSyncStatus, SinkStatus } from './types'
 
 export interface MusicSyncOptions {
   preset: string
@@ -16,8 +16,11 @@ export interface MusicSyncOptions {
   sensitivity: number
   /** How readily onsets are reported; >1 finds more beats (quiet or bass-light material needs it). */
   beatSensitivity: number
-  /** Pick a new colour on every beat instead of using `color` / the preset's own palette. */
-  randomColor: boolean
+  /**
+   * `preset` keeps each preset's own palette (most of them are rainbows). `fixed` tints the whole animation to
+   * `color` — the colour picker only does anything in this mode. `random` picks a new colour on every beat.
+   */
+  colorMode: ColorMode
   analyzer?: Partial<AnalyzerOptions>
 }
 
@@ -26,7 +29,7 @@ export const DEFAULT_MUSIC_OPTIONS: MusicSyncOptions = {
   color: { r: 155, g: 255, b: 49 },
   sensitivity: 1,
   beatSensitivity: 1,
-  randomColor: false,
+  colorMode: 'preset',
 }
 
 /**
@@ -232,13 +235,14 @@ export class MusicSyncEngine {
         this.setStatus({ beats: this.beats, bpm: this.tempoTracker.tempo.bpm })
       }
       // A new colour per beat; the sinks' own rate limits decide how often the device actually follows it.
-      if (this.options.randomColor) {
+      if (this.options.colorMode === 'random') {
         const next = nextRandomColor(this.randomHue)
         this.randomHue = next.hue
         this.randomColor = next.color
       }
     }
-    const color = this.options.randomColor ? this.randomColor : this.options.color
+    const tinted = this.options.colorMode !== 'preset'
+    const color = this.options.colorMode === 'random' ? this.randomColor : this.options.color
     const ctx = { t, color, sensitivity: this.options.sensitivity }
     const accent = this.preset.accent(audio, ctx)
     const frame: MusicFrame = {
@@ -248,7 +252,8 @@ export class MusicSyncEngine {
       color,
       sensitivity: this.options.sensitivity,
       beatSensitivity: this.options.beatSensitivity,
-      accent: this.options.randomColor ? color : accent.color,
+      colorMode: this.options.colorMode,
+      accent: tinted ? color : accent.color,
       intensity: accent.intensity,
     }
     for (const { sink, enabled } of this.sinks.values()) {

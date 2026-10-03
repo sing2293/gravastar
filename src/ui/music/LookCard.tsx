@@ -1,7 +1,14 @@
 import type { ReactNode } from 'react'
 import { MusicSyncEngine } from '@/audio/musicSync'
-import { Card, Field, Select, Slider, Toggle, hexToRgb, rgbToHex } from '@/ui/components/kit'
+import type { ColorMode } from '@/audio/types'
+import { Card, Field, Select, Slider, hexToRgb, rgbToHex } from '@/ui/components/kit'
 import { useEngineOptions } from './useMusicSync'
+
+const COLOR_MODES: { value: ColorMode; label: string }[] = [
+  { value: 'preset', label: 'The preset’s own colours' },
+  { value: 'fixed', label: 'One colour I pick' },
+  { value: 'random', label: 'A random colour on every beat' },
+]
 
 /** Preset / sensitivity / colour — engine-wide options shared by every device. `children` adds per-device controls. */
 export function LookCard({ children }: { children?: ReactNode }) {
@@ -41,27 +48,34 @@ export function LookCard({ children }: { children?: ReactNode }) {
             format={(v) => `${v}%`}
           />
         </Field>
-        <Field label="Colour">
+        <Field
+          label="Colour"
+          hint={
+            options.colorMode === 'fixed'
+              ? 'The animation keeps its shape and brightness but is painted in this one colour, whichever preset is running.'
+              : options.colorMode === 'random'
+                ? 'Every beat picks a new colour; the picker is unused.'
+                : 'Most presets are rainbows and choose their own colours — switch to “One colour I pick” to override them.'
+          }
+        >
           <div className="stack" style={{ gap: 8 }}>
-            <Toggle
-              checked={options.randomColor}
-              onChange={(v) => update({ randomColor: v })}
-              label="Random colour on every beat"
-            />
+            <Select value={options.colorMode} options={COLOR_MODES} onChange={(v) => update({ colorMode: v })} />
             <div className="row">
               <input
                 type="color"
                 className="color-input"
                 value={rgbToHex(options.color)}
-                disabled={options.randomColor || !preset?.usesColor}
-                onChange={(e) => update({ color: hexToRgb(e.target.value) })}
+                disabled={options.colorMode === 'random' || (options.colorMode === 'preset' && !preset?.usesColor)}
+                onChange={(e) => update({ color: hexToRgb(e.target.value), ...(options.colorMode === 'preset' && !preset?.usesColor ? { colorMode: 'fixed' as ColorMode } : {}) })}
               />
               <span className="dim" style={{ fontSize: 12 }}>
-                {options.randomColor
-                  ? 'A new colour is picked on each beat'
-                  : preset?.usesColor
-                    ? 'Used by this preset'
-                    : 'This preset picks its own colours'}
+                {options.colorMode === 'fixed'
+                  ? 'Used everywhere'
+                  : options.colorMode === 'random'
+                    ? 'A new colour on each beat'
+                    : preset?.usesColor
+                      ? 'Used by this preset'
+                      : 'Pick one to switch this preset to a single colour'}
               </span>
             </div>
           </div>

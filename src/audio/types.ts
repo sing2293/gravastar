@@ -3,6 +3,9 @@ import type { PerKeyColor } from '@/model/keyboard'
 
 export type AudioSourceKind = 'system' | 'tab' | 'microphone'
 
+/** Where colour comes from: the preset's palette, one colour the user picked, or a new one on every beat. */
+export type ColorMode = 'preset' | 'fixed' | 'random'
+
 export interface AudioSourceInfo {
   kind: AudioSourceKind
   label: string
@@ -42,6 +45,8 @@ export interface MusicFrame {
   sensitivity: number
   /** The onset-sensitivity knob, for sinks that run their own per-band detector. */
   beatSensitivity: number
+  /** `preset`: the preset's own palette. `fixed`/`random`: everything is tinted to `color`. */
+  colorMode: ColorMode
   /** Single accent colour + intensity for devices with one light (mouse bar, receiver). */
   accent: RGB
   intensity: number

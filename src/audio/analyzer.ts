@@ -13,7 +13,12 @@ export interface AnalyzerOptions {
   minBeatIntervalMs: number
 }
 
-export const DEFAULT_ANALYZER: AnalyzerOptions = { bands: 24, fftSize: 2048, smoothing: 0.55, beatThreshold: 1.6, minBeatIntervalMs: 140 }
+/*
+ * `smoothing` is an exponential average the browser applies to every FFT frame, so it is latency: at 0.55 a change
+ * takes two or three frames to show up, which is tens of milliseconds between the sound and the light. Kept low
+ * enough to feel immediate, high enough that single noisy bins do not flicker the display.
+ */
+export const DEFAULT_ANALYZER: AnalyzerOptions = { bands: 24, fftSize: 2048, smoothing: 0.2, beatThreshold: 1.6, minBeatIntervalMs: 140 }
 
 /** Frames of spectral flux kept for the adaptive threshold (≈ 1 s at the audio-thread tick rate). */
 const FLUX_WINDOW = 48
@@ -155,7 +160,7 @@ export class AudioAnalyzer {
   }
 
   /** A tick source that keeps its cadence while the tab is in the background (see clock.ts). */
-  clock(targetMs = 20): TickSource {
+  clock(targetMs = 11): TickSource {
     return supportsAudioClock(this.ctx) ? audioClock(this.ctx, this.source, targetMs) : frameClock(targetMs)
   }
 
