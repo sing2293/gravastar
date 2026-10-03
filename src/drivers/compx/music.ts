@@ -314,6 +314,46 @@ export class CompxMusic implements MouseMusicService {
     await this.host.hid.command(Command.DeviceOnLine, [], PING_REQUEST)
   }
 
+  /**
+   * What the mouse itself reports for the bytes a session depends on — read from the device, not the shadow — so
+   * "did the idle timer actually change?" can be answered from the UI rather than inferred from symptoms.
+   */
+  async sessionDiagnostics(): Promise<{
+    sleepSeconds: number | undefined
+    performanceOn: boolean | undefined
+    performanceSeconds: number | undefined
+    sensorHighPerformance: boolean | undefined
+    lightOn: boolean | undefined
+    offWhileMoving: boolean | undefined
+  }> {
+    const hid = this.host.hid
+    const read = async (addr: number): Promise<number | undefined> => {
+      try {
+        const [v, c] = await hid.readBytes(addr, 2)
+        return ((v! + c!) & 0xff) === 0x55 ? v : undefined // only a valid record means anything
+      } catch {
+        return undefined
+      }
+    }
+    const [sleep, perf, perfTime, sensor, light, moving] = await Promise.all([
+      read(Addr.SleepTime),
+      read(Addr.PerformanceState),
+      read(Addr.PerformanceTime),
+      read(Addr.SensorMode),
+      read(Addr.LightState),
+      read(Addr.MovingOffLight),
+    ])
+    const flag = (v: number | undefined) => (v === undefined ? undefined : v === 1)
+    return {
+      sleepSeconds: sleep === undefined ? undefined : sleep * 10,
+      performanceOn: flag(perf),
+      performanceSeconds: perfTime === undefined ? undefined : perfTime * 10,
+      sensorHighPerformance: flag(sensor),
+      lightOn: flag(light),
+      offWhileMoving: flag(moving),
+    }
+  }
+
   /** One value write: the light's on byte. Used to wake a bar the firmware has blanked. */
   async setLightOn(): Promise<void> {
     this.flashWrites++

@@ -33,7 +33,7 @@ const HINTS: Partial<Record<Path, string>> = {
 }
 
 /** Mouse-tab view of the shared music session, focused on this mouse. */
-export function MouseMusicPanel({ id, caps }: MousePanelProps) {
+export function MouseMusicPanel({ id, driver, caps, summary }: MousePanelProps) {
   const status = useMusicStatus()
   const startError = useMusicUi((s) => s.startError)
   const impl = musicEngine.getSink(id)
@@ -43,6 +43,7 @@ export function MouseMusicPanel({ id, caps }: MousePanelProps) {
   const [reactTo, setReactTo] = useState<MouseReaction>(sink?.options.reactTo ?? 'beat')
   const [force, setForce] = useState(sink?.options.forceWrites ?? true)
   const [testing, setTesting] = useState(false)
+  const [diag, setDiag] = useState<string>()
   const [testResult, setTestResult] = useState<string>()
   // The store registers the sink asynchronously; pick up its options once it exists.
   useEffect(() => {
@@ -62,6 +63,32 @@ export function MouseMusicPanel({ id, caps }: MousePanelProps) {
     sink.options = { ...sink.options, prefer: v }
     // A running session keeps the strategy it prepared with, so re-prepare this device right away.
     void musicEngine.refreshSink(id)
+  }
+
+  const readDiagnostics = async () => {
+    const music = driver.music as (typeof driver.music & { sessionDiagnostics?: () => Promise<Record<string, unknown>> }) | undefined
+    if (!music?.sessionDiagnostics) return
+    try {
+      const d = await music.sessionDiagnostics()
+      const show = (v: unknown, unit = '') => (v === undefined ? 'no record' : typeof v === 'boolean' ? (v ? 'on' : 'off') : `${v as number}${unit}`)
+      const lines = [
+        `sleep / light-off timer: ${show(d.sleepSeconds, ' s')}`,
+        `highest performance: ${show(d.performanceOn)} for ${show(d.performanceSeconds, ' s')}`,
+        `sensor high-performance mode: ${show(d.sensorHighPerformance)}`,
+        `light on: ${show(d.lightOn)} · off while moving: ${show(d.offWhileMoving)}`,
+        sink ? `session: ${mine?.mode ?? 'idle'} · ${sink.writeLatencyMs} ms per write · ${sink.missedKeepAlives} keep-alives unanswered · ${sink.memoryWriteCount} memory writes` : 'session: not registered',
+        `firmware ${summary.info?.firmwareVersion ?? '?'} · receiver ${summary.info?.dongleFirmwareVersion ?? '?'} · ${summary.link}`,
+      ]
+      const text = lines.join('\n')
+      setDiag(text)
+      try {
+        await navigator.clipboard.writeText(text)
+      } catch {
+        /* clipboard may be unavailable; the text is on screen anyway */
+      }
+    } catch (e) {
+      setDiag(`could not read: ${(e as Error).message}`)
+    }
   }
 
   const runFlashTest = async () => {
@@ -135,6 +162,23 @@ export function MouseMusicPanel({ id, caps }: MousePanelProps) {
               }}
               label={force ? 'On — never waits, never slows down' : 'Off — waits for confirmation, slows down when the mouse does'}
             />
+          </Field>
+          <Field
+            label="What the mouse says"
+            hint="Reads the idle timer and power settings back from the mouse itself. If the timer still reads 10 s while music sync is running, the mouse is refusing the change and that is why it dozes."
+          >
+            <div className="stack" style={{ gap: 6 }}>
+              <div className="row">
+                <Button disabled={!sink} onClick={() => void readDiagnostics()}>
+                  Read from mouse &amp; copy
+                </Button>
+              </div>
+              {diag && (
+                <pre className="dim" style={{ fontSize: 12, whiteSpace: 'pre-wrap', margin: 0 }}>
+                  {diag}
+                </pre>
+              )}
+            </div>
           </Field>
           <Field
             label="Is the light reacting?"
