@@ -298,6 +298,16 @@ export class CompxMusic implements MouseMusicService {
     this.sleepByteHeld = value
   }
 
+  /**
+   * `DeviceOnLine` (0x03): the cheapest round-trip the protocol has, and it writes nothing. A wireless mouse that
+   * has stopped seeing traffic drops into power saving; repeating this keeps the link busy. Whether this particular
+   * firmware counts host traffic as activity (rather than only sensor motion) is UNVERIFIED — it is harmless either
+   * way, and the sink reports whether the mouse kept answering.
+   */
+  async ping(): Promise<void> {
+    await this.host.hid.command(Command.DeviceOnLine, [], STREAM_REQUEST)
+  }
+
   /** One value write: the light's on byte. Used to wake a bar the firmware has blanked. */
   async setLightOn(): Promise<void> {
     this.flashWrites++

@@ -55,6 +55,11 @@ export interface MouseSinkOptions {
   /** Strobe mode: beats weaker than this (0..1) do not flash. */
   strobeBeatThreshold: number
   /**
+   * How often to send a harmless keep-alive read while a session runs, so the mouse keeps seeing traffic and does
+   * not decide it is idle. Costs no settings-memory writes. 0 disables.
+   */
+  keepAliveMs: number
+  /**
    * How often to re-assert the light while a session runs, in case the firmware blanked it after the mouse sat
    * still. Pulse mode writes nothing on its own once the look is steady, so without this the bar goes out and
    * stays out when the mouse is left untouched. 0 disables.
@@ -84,6 +89,7 @@ export const DEFAULT_MOUSE_SINK_OPTIONS: MouseSinkOptions = {
   strobeFps: 14,
   strobeOnMs: 60,
   strobeBeatThreshold: 0.12,
+  keepAliveMs: 900,
   keepAwakeMs: 5_000,
   reactTo: 'beat',
   // No cap by default: the light bar has been shown to take live writes on real hardware, and a strobe that stops
@@ -255,6 +261,10 @@ export class MouseSink implements LightingSink {
   private onsetBand: MouseReaction = 'beat'
   private lastWake = -Infinity
   private waking = false
+  private lastPing = -Infinity
+  private pinging = false
+  /** Keep-alive reads the mouse failed to answer: if these climb, it is asleep whatever we send. */
+  private missedPings = 0
   /** Round-trip of the last settings-memory write, ms — what limits how fast a software strobe can blink. */
   private writeMs = 0
   /** Grows while the mouse fails to answer writes, so the sink stops pushing a device that cannot keep up. */
@@ -294,6 +304,9 @@ export class MouseSink implements LightingSink {
     this.onsetBand = this.options.reactTo
     this.lastWake = -Infinity
     this.waking = false
+    this.lastPing = -Infinity
+    this.pinging = false
+    this.missedPings = 0
     this.writeMs = 0
     this.backoff = 1
     this.timeouts = 0
@@ -380,6 +393,7 @@ export class MouseSink implements LightingSink {
     const react = this.reaction(frame, now)
     if (react.fire) this.tempo.beat(now)
     if (this.strategy !== 'dongle') this.pushBar(frame, now)
+    this.keepAlive(now)
     this.keepAwake(now)
     if (this.inFlight) return
     let write: Promise<void>
@@ -524,6 +538,34 @@ export class MouseSink implements LightingSink {
    * The mouse blanks its light after an idle timeout even with the timer pushed out, so the on byte is re-asserted
    * periodically. Without it the lights simply stop part-way through a session and never come back.
    */
+  /**
+   * Cheap traffic so the mouse does not conclude nothing is happening. Skipped while a real write is in flight —
+   * they share one queue, and the light matters more than the ping.
+   */
+  private keepAlive(now: number): void {
+    const every = this.options.keepAliveMs
+    if (!every || this.pinging || this.inFlight || !this.music) return
+    if (now - this.lastPing < every) return
+    this.lastPing = now
+    this.pinging = true
+    this.music
+      .ping()
+      .then(() => {
+        this.missedPings = 0
+      })
+      .catch(() => {
+        this.missedPings++
+      })
+      .finally(() => {
+        this.pinging = false
+      })
+  }
+
+  /** Keep-alive reads this mouse did not answer in a row — a mouse asleep despite everything we send. */
+  get missedKeepAlives(): number {
+    return this.missedPings
+  }
+
   private keepAwake(now: number): void {
     const every = this.options.keepAwakeMs
     const body = this.strategy === 'pulse' || this.strategy === 'strobe' || this.strategy === 'gentle'

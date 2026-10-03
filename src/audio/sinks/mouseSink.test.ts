@@ -51,6 +51,11 @@ class StubMusic implements MouseMusicService {
     this.calls.push('setLightOn')
     return this.write()
   }
+  ping(): Promise<void> {
+    this.calls.push('ping')
+    return this.pingFails ? Promise.reject(new Error('no answer')) : Promise.resolve()
+  }
+  pingFails = false
   async restore(): Promise<void> {
     this.calls.push('restore')
   }
@@ -664,6 +669,38 @@ describe('MouseSink when the mouse cannot keep up', () => {
       await flush()
     }
     expect(music.effects.length).toBeGreaterThan(during + 5)
+  })
+})
+
+describe('MouseSink keep-alive', () => {
+  it('pings the mouse steadily so it never sees an idle gap, without spending memory writes', async () => {
+    const music = new StubMusic({ flashLight: true })
+    const sink = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'pulse', keepAliveMs: 500, keepAwakeMs: 0 })
+    await sink.prepare()
+    await sweep(sink, 0, 5000, 100)
+    const pings = music.calls.filter((c) => c === 'ping').length
+    expect(pings).toBeGreaterThanOrEqual(8) // ~ one every 500 ms over five seconds
+    expect(sink.status().memoryWrites).toBe(1) // the initial look only: pings cost nothing
+    expect(sink.missedKeepAlives).toBe(0)
+  })
+
+  it('counts unanswered pings so a mouse that is asleep anyway can be told apart', async () => {
+    const music = new StubMusic({ flashLight: true })
+    music.pingFails = true
+    const sink = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'pulse', keepAliveMs: 200, keepAwakeMs: 0 })
+    await sink.prepare()
+    await sweep(sink, 0, 2000, 100)
+    expect(sink.missedKeepAlives).toBeGreaterThan(2)
+    expect(sink.status().active).toBe(true) // a missed ping is information, not a failure
+    expect(sink.status().error).toBeUndefined()
+  })
+
+  it('can be switched off', async () => {
+    const music = new StubMusic({ flashLight: true })
+    const sink = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'pulse', keepAliveMs: 0, keepAwakeMs: 0 })
+    await sink.prepare()
+    await sweep(sink, 0, 3000, 100)
+    expect(music.calls).not.toContain('ping')
   })
 })
 

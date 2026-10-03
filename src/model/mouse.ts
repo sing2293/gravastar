@@ -259,6 +259,11 @@ export interface MouseMusicService {
    */
   setLightOn(): Promise<void>
   /**
+   * A harmless read the host can repeat while a session runs, to keep the mouse from deciding it is idle. Costs no
+   * settings-memory writes, so it can be sent far more often than anything that touches the light.
+   */
+  ping(): Promise<void>
+  /**
    * Light-bar block write in settings memory (mode included, so the firmware's own breathing can be used instead of
    * driving every frame from the host). Every call is an erase cycle: callers decide the rate. The shipped sink
    * paces pulse mode hard and lets strobe write on every beat with no cap, which is a deliberate choice — these

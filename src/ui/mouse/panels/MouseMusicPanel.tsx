@@ -83,9 +83,9 @@ export function MouseMusicPanel({ id, caps }: MousePanelProps) {
       <Notice kind="info">
         {MOUSE_MEMORY_NOTE}
         {caps.hasDongle ? ' The receiver’s RGB bar is a live command path and is driven alongside the mouse.' : ''} A
-        wireless mouse stops servicing writes a few seconds after it stops moving, so a session switches on the
-        firmware’s “highest performance” hold and high-performance sensor mode — it costs battery, and both are put
-        back when you stop.
+        wireless mouse stops servicing writes a few seconds after it stops moving, so a session keeps the link busy
+        with a harmless read about once a second and switches on the firmware’s “highest performance” hold and
+        high-performance sensor mode — it costs battery, and both are put back when you stop.
       </Notice>
       {path === 'strobe' && (
         <Notice>
@@ -128,6 +128,7 @@ export function MouseMusicPanel({ id, caps }: MousePanelProps) {
               {mine?.active && sink && sink.writeLatencyMs > 0 && (
                 <span className="dim" style={{ fontSize: 12 }}>
                   {sink.writeLatencyMs} ms per write
+                  {sink.missedKeepAlives > 0 ? ` · ${sink.missedKeepAlives} keep-alives unanswered — the mouse is asleep` : ''}
                 </span>
               )}
             </div>

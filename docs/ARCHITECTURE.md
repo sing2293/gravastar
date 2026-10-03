@@ -122,7 +122,10 @@ is JSON of these types; vendor profile files are converted at the edge.
   out to be **power saving, not the light**: a wireless mouse left untouched for ~10 s stops servicing writes (which
   is also where the `0x07` timeouts came from) and resumes the instant it is moved, so a session also holds the
   firmware's "highest performance" switch (`0xB5`, hold time `0xB7` at 900 s) and high-performance sensor mode
-  (`0xB9`). All three are restored on release — they cost battery and are the user's settings, not ours.
+  (`0xB9`). All three are restored on release — they cost battery and are the user's settings, not ours. A session
+  also sends a keep-alive `DeviceOnLine` read roughly once a second (`keepAliveMs`): it writes nothing, keeps the
+  radio link busy, and counts unanswered replies, which is the one signal that tells "the mouse is asleep" apart
+  from "the lights are wrong".
 - Latency matters as much as throughput: `AnalyserNode.smoothingTimeConstant` is an exponential average of the FFT,
   so it is delay between the sound and the light (0.2, down from 0.55), and the audio-thread clock runs a 512-sample
   buffer (~11 ms) rather than 1024. Before any body-light strategy runs, `enterLightSession` switches the light on and clears
