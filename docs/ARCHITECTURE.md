@@ -109,9 +109,12 @@ is JSON of these types; vendor profile files are converted at the edge.
   which path is active. `reactTo` picks what the mouse follows — the mix's own onset, or a single band's through
   `audio/onset.ts` (`bass`, `mid`, `treble`), which then also drives its brightness.
 
-  **Pacing is the whole game here.** Live writes use `STREAM_REQUEST` (350 ms, *one* attempt): the vendor's 5 × 200 ms
+  **Pacing is the whole game here.** Live writes use `STREAM_REQUEST` (900 ms, *one* attempt): the vendor's 5 × 200 ms
   retry holds the serial queue for a full second, and on hardware that showed up as `0x07` timeouts with the lighting
-  freezing behind them. The sink measures each write's round-trip, refuses to issue another inside 1.3 × that, and
+  freezing behind them. The timeout is long on purpose: a 2.4 GHz mouse that has sat still slows its radio right
+  down, so a write that lands in 20 ms while the mouse is in use takes several hundred once it is idle — calling that
+  a failure (an earlier 350 ms) is what made the lights *stop* when the mouse was left alone instead of merely
+  lagging. The status line now says "answering slowly (N ms per write)" when that is what is happening. The sink measures each write's round-trip, refuses to issue another inside 1.3 × that, and
   multiplies every gate by a backoff that grows on timeouts and decays on success — a mouse that cannot keep up is
   given room instead of being hammered. `enterLightSession` also parks the sleep / light-off byte (`0xAD`) at its
   maximum for the session, because its stock 10–60 s idle timer otherwise blanks the bar part-way through a track;

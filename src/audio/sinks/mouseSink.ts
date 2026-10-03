@@ -116,8 +116,11 @@ export const BUDGET_NOTE = 'write budget reached — mouse paused to protect its
 /** Hard ceiling on the pacing multiplier: beyond this the lights are visibly broken anyway. */
 const MAX_BACKOFF = 3
 /** Unanswered keep-alives before the mouse counts as asleep. */
-export const ASLEEP_AFTER_MISSES = 2
-export const ASLEEP_NOTE = 'the mouse has gone to sleep — waiting for it to wake (move it, or turn its power saving off in Settings)'
+export const ASLEEP_AFTER_MISSES = 3
+export const ASLEEP_NOTE =
+  'the mouse is not answering at all — waiting for it to wake (move it, or turn its power saving off in Settings)'
+/** Write round-trip above which the mouse is clearly dozing rather than busy, for the status line. */
+const SLOW_WRITE_MS = 200
 
 const MODE_LABEL: Record<MouseSinkStrategy, MouseSinkMode> = {
   amplitude: 'amplitude',
@@ -700,9 +703,18 @@ export class MouseSink implements LightingSink {
       writes: this.writes,
       memoryWrites: this.memoryWrites,
       mode: this.mode,
-      note: this.note,
+      note: this.note ?? this.pacingNote(),
       error: this.error,
     }
+  }
+
+  /**
+   * A mouse left alone slows its radio right down, so each write takes far longer and the lights visibly lag. Worth
+   * saying plainly — it is the difference between "this is broken" and "your mouse is dozing".
+   */
+  private pacingNote(): string | undefined {
+    if (this.writeMs < SLOW_WRITE_MS) return undefined
+    return `the mouse is answering slowly (${this.writeMs} ms per write) — it slows its radio down when it sits still; move it, or turn its power saving off in Settings`
   }
 
   private setMode(strategy: MouseSinkStrategy | undefined, note: string | undefined): void {

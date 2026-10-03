@@ -26,11 +26,16 @@ export interface RequestOptions {
 }
 
 /**
- * Profile for real-time writes (music sync): wait a little longer for the echo — a busy flash can take its time —
- * but never retry. The vendor's 5 × 200 ms would hold the serial queue for a full second, during which nothing
- * else reaches the mouse and the animation stops dead.
+ * Profile for real-time writes (music sync). Never retry — the vendor's 5 × 200 ms holds the serial queue for a
+ * full second with nothing else reaching the mouse. But wait a long time for the echo: a 2.4 GHz mouse that has
+ * been sitting still slows its radio right down, so a write that would land in 20 ms while it is in use can take
+ * several hundred once it is idle. Treating that as a failure is what made the lights stop instead of merely
+ * lagging; one patient attempt keeps them going.
  */
-export const STREAM_REQUEST: RequestOptions = { timeoutMs: 350, attempts: 1 }
+export const STREAM_REQUEST: RequestOptions = { timeoutMs: 900, attempts: 1 }
+
+/** Keep-alive reads: rarer still, and their whole purpose is to answer "is the mouse reachable at all?". */
+export const PING_REQUEST: RequestOptions = { timeoutMs: 1500, attempts: 1 }
 
 export type StatusListener = (frame: Uint8Array) => void
 

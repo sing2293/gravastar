@@ -25,7 +25,7 @@ import type {
 } from '@/model/mouse'
 import { Addr, encodeLightBlock } from './eeprom'
 import { Command, FRAME_SIZE, PAYLOAD_MAX, buildFrame, type ParsedFrame } from './frame'
-import { STREAM_REQUEST, type CompxLink } from './link'
+import { PING_REQUEST, STREAM_REQUEST, type CompxLink } from './link'
 
 /** Office-keyboard commands (`HIDHandle.js:245-248`) that `Command` in frame.ts does not list. */
 export const enum MusicCommand {
@@ -305,7 +305,7 @@ export class CompxMusic implements MouseMusicService {
    * way, and the sink reports whether the mouse kept answering.
    */
   async ping(): Promise<void> {
-    await this.host.hid.command(Command.DeviceOnLine, [], STREAM_REQUEST)
+    await this.host.hid.command(Command.DeviceOnLine, [], PING_REQUEST)
   }
 
   /** One value write: the light's on byte. Used to wake a bar the firmware has blanked. */

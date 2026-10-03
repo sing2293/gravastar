@@ -673,6 +673,34 @@ describe('MouseSink when the mouse cannot keep up', () => {
   })
 })
 
+describe('MouseSink on a slow idle link', () => {
+  it('keeps writing, just slower, when the mouse answers late instead of giving up', async () => {
+    // A mouse that has sat still answers in hundreds of ms rather than tens: slow, not gone.
+    class SlowLink extends StubMusic {
+      delayMs = 0
+      setLightEffect(effect: MouseLightEffect): Promise<void> {
+        this.calls.push('setLightEffect')
+        this.effects.push(effect)
+        return new Promise((resolve) => setTimeout(resolve, this.delayMs))
+      }
+    }
+    const music = new SlowLink({ flashLight: true })
+    const sink = new MouseSink('m', 'Mouse', driverWith(music), { prefer: 'strobe', strobeFps: 20, keepAliveMs: 0 })
+    await sink.prepare()
+    music.delayMs = 30
+    // Frame time and wall time must both advance: the in-flight guard is real, the beat clock is scripted.
+    for (let t = 0; t <= 2000; t += 50) {
+      sink.push(frame(t, { beat: (t / 50) % 4 === 0, beatStrength: 1 }))
+      await new Promise<void>((r) => setTimeout(r, 35))
+    }
+    const written = music.effects.length
+    expect(written).toBeGreaterThan(4)
+    expect(sink.status().active).toBe(true)
+    expect(sink.status().error).toBeUndefined() // a slow answer is not an error
+    expect(sink.missedKeepAlives).toBe(0)
+  })
+})
+
 describe('MouseSink keep-alive', () => {
   it('pings the mouse steadily so it never sees an idle gap, without spending memory writes', async () => {
     const music = new StubMusic({ flashLight: true })
